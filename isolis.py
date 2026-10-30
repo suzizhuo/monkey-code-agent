@@ -389,6 +389,32 @@ def detect_llm():
     }
 
 
+def max_message_chars():
+    raw = os.environ.get("ISOLIS_MAX_MESSAGE_CHARS", "").strip()
+    if not raw:
+        return 48000
+    try:
+        value = int(raw)
+    except ValueError:
+        raise IsolisError("ISOLIS_MAX_MESSAGE_CHARS must be an integer (got %r)" % raw)
+    if value < 0:
+        raise IsolisError("ISOLIS_MAX_MESSAGE_CHARS must be zero or positive")
+    return value
+
+
+def context_tokens():
+    raw = os.environ.get("ISOLIS_CONTEXT_TOKENS", "").strip()
+    if not raw:
+        return 60000
+    try:
+        value = int(raw)
+    except ValueError:
+        raise IsolisError("ISOLIS_CONTEXT_TOKENS must be an integer (got %r)" % raw)
+    if value < 0:
+        raise IsolisError("ISOLIS_CONTEXT_TOKENS must be zero or positive")
+    return value
+
+
 def profile_from_env():
     return os.environ.get("ISOLIS_PROFILE", "").strip() or DEFAULT_PROFILE
 
@@ -666,6 +692,10 @@ def start_container(name, container, port, llm, profile="tooled",
         "-e",
         "ISOLIS_SOURCE=" + sanitize_source(source),
         "-e",
+        "ISOLIS_CONTEXT_TOKENS=" + str(context_tokens()),
+        "-e",
+        "ISOLIS_MAX_MESSAGE_CHARS=" + str(max_message_chars()),
+        "-e",
         "MCAI_LLM_BASE_URL",
         "-e",
         "MCAI_LLM_API_KEY",
@@ -862,6 +892,10 @@ def cmd_status():
         )
     current_entry = agents.get(current) or {}
     print(isolation_summary(current_entry.get("profile", profile_from_env())))
+    print(
+        "context budget: %d tokens, message cap: %d chars (budget 0 disables compression)"
+        % (context_tokens(), max_message_chars())
+    )
     source = current_entry.get("source")
     if source:
         print("agent source: %s" % source)
@@ -945,10 +979,26 @@ def cmd_doctor():
         print("  [fail] agent sources missing: %s" % AGENT_DIR)
         ok = False
 
-    key, cfg = profile_config(profile_from_env())
+    try:
+        key, cfg = profile_config(profile_from_env())
+        print("  [ok]   profile: %s (install %s)"
+              % (key, "on" if cfg["install"] else "off"))
+    except IsolisError as exc:
+        print("  [fail] %s" % exc)
+        ok = False
+        key, cfg = DEFAULT_PROFILE, PROFILES[DEFAULT_PROFILE]
+
+    try:
+        budget = context_tokens()
+        if budget:
+            print("  [ok]   context budget: %d tokens (auto compression on)" % budget)
+        else:
+            print("  [warn] context budget: 0 (auto compression off, 24-turn cap only)")
+    except IsolisError as exc:
+        print("  [fail] %s" % exc)
+        ok = False
+
     src = sanitize_source(source_from_env())
-    print("  [ok]   profile: %s (install %s)"
-          % (key, "on" if cfg["install"] else "off"))
     if src == "local":
         print("  [ok]   agent source: local (%s)" % AGENT_DIR)
     else:
@@ -1179,6 +1229,8 @@ options (init, setup, rebuild):
 
 environment:
   ISOLIS_PROFILE, ISOLIS_AGENT_SOURCE, ISOLIS_MODEL, ISOLIS_DEFAULT_MODEL
+  ISOLIS_CONTEXT_TOKENS    token budget before memory compression (0 = off)
+  ISOLIS_MAX_MESSAGE_CHARS per-message character cap
 """
 
 

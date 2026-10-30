@@ -456,12 +456,35 @@ half second with a three second per-request timeout.
   "android_home": "<path>",
   "tools": ["..."],
   "workspace": "/work",
-  "history_turns": 0
+  "history_turns": 0,
+  "history_tokens": 0,
+  "context_tokens": 60000,
+  "max_message_chars": 48000,
+  "compressed_turns": 0,
+  "archived_turns": 0
 }
 ```
 
 The host MUST reject an agent whose `/info` does not confirm the expected access
 route and injection before declaring it ready.
+
+### 8.2.1 `GET /history`
+
+Returns the live conversation and the archive for auditing:
+
+```json
+{
+  "ok": true,
+  "context_tokens": 60000,
+  "history_tokens": 120,
+  "compressed_turns": 0,
+  "history": [{"role": "user", "content": "..."}],
+  "archive": [{"role": "user", "content": "...", "reason": "compressed", "at": "<timestamp>"}]
+}
+```
+
+`reason` is `compressed` for turns folded into a summary and `evicted` for turns
+removed by the turn-count cap.
 
 ### 8.3 `POST /chat`
 
@@ -474,7 +497,20 @@ Request:
 Success:
 
 ```json
-{"ok": true, "reply": "<assistant text>", "tools_used": []}
+{
+  "ok": true,
+  "reply": "<assistant text>",
+  "tools_used": [],
+  "memory": {
+    "trimmed_input": false,
+    "trimmed_reply": false,
+    "evicted": 0,
+    "compressed_turns": 0,
+    "history_turns": 1,
+    "context_tokens": 60000,
+    "history_tokens": 120
+  }
+}
 ```
 
 Errors:
@@ -484,21 +520,72 @@ Errors:
 - Unknown path: 404.
 - Runtime failure: 500 with an error string and a trace.
 
-### 8.4 Memory and system prompt
+### 8.4 Memory, token budget, and automatic compression
 
-The runtime keeps a system message plus the most recent bounded number of
-user and assistant turns. The reference bound is the last 24 pairs; older turns
-are discarded from the front. The system prompt comes from the environment when
-set and otherwise falls back to a built-in prompt describing the sandbox,
-including the active profile and whether package installation is available.
+Conversation memory is bounded on three independent axes. All three MUST be
+implemented; they solve different failure modes.
+
+**Axis 1: turn count.** The runtime keeps a system message plus at most 24
+user/assistant pairs. Older pairs are removed from the front and recorded in an
+in-memory archive with reason `evicted`.
+
+**Axis 2: per-message size.** Any inbound user message and any outbound assistant
+reply longer than `ISOLIS_MAX_MESSAGE_CHARS` (default 48000 characters) MUST be
+truncated before it enters memory. Truncation keeps the head and the tail and
+inserts an explicit marker stating how many characters were removed. This
+prevents one pasted file from consuming the whole budget.
+
+**Axis 3: token budget with automatic compression.** The runtime estimates the
+token size of the live history plus the system prompt and compresses when the
+estimate exceeds `ISOLIS_CONTEXT_TOKENS` (default 60000, `0` disables).
+
+Compression works as follows:
+
+1. Fold the oldest batch of turns (up to eight messages) into one summary by
+   asking the same model for a compact briefing.
+2. The summary prompt MUST preserve facts, file paths, commands, versions,
+   decisions, errors, and unresolved questions, and MUST cap the result at a
+   fixed character budget.
+3. Replace the folded turns with one assistant entry prefixed by a stable
+   marker, `[compressed history]`.
+4. When an entry with that marker already exists, fold into it and overwrite it
+   instead of inserting a second marker. At most one compression entry may exist
+   in history at any time.
+5. Repeat until the estimate is within budget or no batch remains eligible. At
+   least the newest pair MUST stay uncompressed.
+6. Records every folded turn in an archive with reason `compressed`.
+
+If compression cannot reach the budget (for example a single oversized exchange),
+the bounded turn count and message cap still hold, so memory cannot grow without
+limit.
+
+The archive keeps the most recent 400 entries and evicts the oldest. Archived
+content is exposed for inspection and is never sent to the model.
+
+The system prompt comes from `ISOLIS_SYSTEM_PROMPT` when set. Otherwise a
+built-in prompt describes the sandbox, including the active profile and whether
+package installation is available.
 
 The built-in prompt SHOULD tell the model that it runs inside an isolated
 container, cannot see the host filesystem, sibling containers, or the Docker
 socket, and should match the user's language while staying concise and factual.
 
 The system prompt MUST be overridable so different deployments can change agent
-behavior without rebuilding the image. The override variable is
-`ISOLIS_SYSTEM_PROMPT`; when it is empty the built-in prompt is used.
+behavior without rebuilding the image.
+
+### 8.5 Memory observability
+
+`/info` MUST report `history_turns`, `history_tokens`, `context_tokens`,
+`max_message_chars`, `compressed_turns`, and `archived_turns`.
+
+`/chat` MUST include a `memory` object describing the effect of the request:
+whether the input and reply were truncated, how many pairs were evicted, the
+running compressed-turn count, the live turn count, the budget, and the current
+history token estimate.
+
+`GET /history` MUST return the live history and the archive together with the
+same counters, so long-running sessions can be audited without restarting the
+agent.
 
 ---
 
@@ -543,11 +630,17 @@ These values make the limits auditable. An implementation MAY choose different
 numbers, but it MUST document them and keep every loop and subprocess bounded.
 
 ```
-MAX_TURNS         24    conversation turns retained per agent
-MAX_TOOL_STEPS     8    model/tool round trips per chat request
-SHELL_TIMEOUT    120    seconds per run_command call
-INSTALL_TIMEOUT 1800    seconds per install call
-MAX_OUTPUT     20000    characters returned by any single tool
+MAX_TURNS              24     conversation pairs retained per agent
+MAX_TOOL_STEPS          8     model/tool round trips per chat request
+SHELL_TIMEOUT         120     seconds per run_command call
+INSTALL_TIMEOUT      1800     seconds per install call
+MAX_OUTPUT          20000     characters returned by any single tool
+CONTEXT_TOKENS      60000     token budget before automatic compression
+MAX_MESSAGE_CHARS   48000     per-message character cap
+COMPRESS_BATCH          8     oldest messages folded per compression pass
+SUMMARY_MAX_CHARS    4000     summary length cap
+SUMMARY_INPUT_CHARS 24000     characters of raw turns fed to the summarizer
+ARCHIVE_MAX           400     retained archive entries
 ```
 
 ### 9.3 Image prerequisites for development
@@ -727,6 +820,17 @@ A build is complete only when every item below is observable.
     a reply instead of looping forever.
 21. A tool call that produces more than 20000 characters returns a truncated
     result with an explicit truncation marker.
+22. With `ISOLIS_CONTEXT_TOKENS` set below the live history size, the next chat
+    folds the oldest turns into one `[compressed history]` entry,
+    `compressed_turns` increases, and the archive grows.
+23. Repeated compression never produces a second `[compressed history]` entry;
+    the existing summary is updated in place.
+24. With `ISOLIS_CONTEXT_TOKENS=0`, compression is disabled, the archive only
+    receives `evicted` entries, and the 24-pair cap still holds.
+25. A message longer than `ISOLIS_MAX_MESSAGE_CHARS` is stored truncated with a
+    marker, and `/chat` reports `trimmed_input: true`.
+26. `GET /history` returns both the live history and the archive with matching
+    counters.
 
 ---
 

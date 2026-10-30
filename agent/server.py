@@ -58,6 +58,25 @@ SHELL_TIMEOUT = 120
 INSTALL_TIMEOUT = 1800
 MAX_OUTPUT = 20000
 
+
+def _int_env(name, default):
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+CONTEXT_TOKENS = _int_env("ISOLIS_CONTEXT_TOKENS", 60000)
+MAX_MESSAGE_CHARS = _int_env("ISOLIS_MAX_MESSAGE_CHARS", 48000)
+COMPRESS_BATCH = 8
+SUMMARY_MAX_CHARS = 4000
+SUMMARY_INPUT_CHARS = 24000
+ARCHIVE_MAX = 400
+SUMMARY_MARKER = "[compressed history]"
+
 BASE_URL = os.environ.get("MCAI_LLM_BASE_URL", "").strip()
 API_KEY = os.environ.get("MCAI_LLM_API_KEY", "").strip()
 MODEL = os.environ.get("MCAI_LLM_MODEL", "").strip()
@@ -70,6 +89,50 @@ LLM = None
 LLM_LOCK = threading.Lock()
 PROTOCOL = None
 PROTOCOL_LOCK = threading.Lock()
+ARCHIVE = []
+ARCHIVE_LOCK = threading.Lock()
+COMPRESSED_TURNS = 0
+
+
+def _encoder():
+    try:
+        import tiktoken
+
+        return tiktoken.get_encoding("cl100k_base")
+    except Exception:
+        return None
+
+
+ENCODER = _encoder()
+
+
+def count_tokens(text):
+    if not text:
+        return 0
+    if ENCODER is not None:
+        try:
+            return len(ENCODER.encode(text, disallowed_special=()))
+        except Exception:
+            pass
+    return max(1, len(text) // 4)
+
+
+def history_tokens(history):
+    return sum(count_tokens(turn.get("content", "")) for turn in history)
+
+
+def truncate_message(text):
+    if MAX_MESSAGE_CHARS <= 0 or len(text) <= MAX_MESSAGE_CHARS:
+        return text, False
+    keep = MAX_MESSAGE_CHARS - 120
+    if keep < 1000:
+        keep = MAX_MESSAGE_CHARS
+    head = keep // 2
+    tail = keep - head
+    note = "\n...[truncated %d chars from the middle]...\n" % (
+        len(text) - keep
+    )
+    return text[:head] + note + text[-tail:], True
 
 
 def common_fields():
@@ -434,13 +497,150 @@ def run_tool_loop(messages, bound):
     return final or "stopped after %d tool steps" % MAX_TOOL_STEPS, transcript
 
 
+def archive_turns(turns, reason):
+    if not turns:
+        return
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    with ARCHIVE_LOCK:
+        for turn in turns:
+            ARCHIVE.append(
+                {
+                    "role": turn.get("role", ""),
+                    "content": turn.get("content", ""),
+                    "reason": reason,
+                    "at": stamp,
+                }
+            )
+        if len(ARCHIVE) > ARCHIVE_MAX:
+            del ARCHIVE[: len(ARCHIVE) - ARCHIVE_MAX]
+
+
+def render_for_summary(turns):
+    lines = []
+    budget = SUMMARY_INPUT_CHARS
+    for turn in turns:
+        role = "user" if turn.get("role") == "user" else "assistant"
+        content = (turn.get("content") or "").strip()
+        if not content:
+            continue
+        if len(content) > 2000:
+            content = content[:2000] + "...[cut]"
+        block = "%s: %s" % (role, content)
+        if budget - len(block) < 0:
+            lines.append("...[earlier turns omitted]...")
+            break
+        lines.append(block)
+        budget -= len(block)
+    return "\n\n".join(lines)
+
+
+def summarize_turns(turns, prior=""):
+    blocks = []
+    if prior:
+        blocks.append("earlier summary: " + prior)
+    text = render_for_summary(turns)
+    if text:
+        blocks.append(text)
+    body = "\n\n".join(blocks)
+    if not body:
+        return prior
+    prompt = (
+        "Compress the conversation excerpt below into a compact briefing for "
+        "continuing the same task. Keep facts, file paths, commands, versions, "
+        "decisions, errors and unresolved questions. Drop pleasantries and "
+        "repetition. Write at most 200 words, plain text, no preamble.\n\n"
+        + body
+    )
+    try:
+        response = get_llm().invoke(
+            [HumanMessage(content=prompt[: SUMMARY_INPUT_CHARS + 4000])]
+        )
+        summary = content_to_text(getattr(response, "content", response)).strip()
+    except Exception as exc:
+        summary = prior or "summary unavailable (%s)" % exc
+    if len(summary) > SUMMARY_MAX_CHARS:
+        summary = summary[:SUMMARY_MAX_CHARS] + "...[cut]"
+    return summary
+
+
+def compression_start():
+    if HISTORY and str(HISTORY[0].get("content", "")).startswith(SUMMARY_MARKER):
+        return 1
+    return 0
+
+
+def history_pairs():
+    return sum(1 for turn in HISTORY if turn.get("role") == "user")
+
+
+def evict_history(limit):
+    global COMPRESSED_TURNS
+    dropped = 0
+    while history_pairs() > limit:
+        start = compression_start()
+        if len(HISTORY) - start < 2:
+            break
+        overflow = HISTORY[start:start + 2]
+        del HISTORY[start:start + 2]
+        archive_turns(overflow, "evicted")
+        dropped += 2
+    return dropped
+
+
+def compress_history(force=False):
+    global COMPRESSED_TURNS
+    if CONTEXT_TOKENS <= 0:
+        return None
+    folded = 0
+    summaries = []
+    passes = 0
+    while passes < 8:
+        passes += 1
+        tokens = history_tokens(HISTORY) + count_tokens(SYSTEM_PROMPT)
+        if not force and tokens <= CONTEXT_TOKENS:
+            break
+        force = False
+        start = compression_start()
+        available = len(HISTORY) - start - 2
+        if available < 4:
+            break
+        batch = min(COMPRESS_BATCH, available)
+        if batch % 2:
+            batch -= 1
+        if batch <= 0:
+            break
+        prior = ""
+        if start:
+            prior = str(HISTORY[0].get("content", ""))[len(SUMMARY_MARKER):].strip()
+        older = HISTORY[start:start + batch]
+        summary = summarize_turns(older, prior)
+        del HISTORY[start:start + batch]
+        archive_turns(older, "compressed")
+        folded += batch
+        if not summary:
+            continue
+        COMPRESSED_TURNS += batch
+        summaries.append(summary)
+        entry = {"role": "assistant", "content": SUMMARY_MARKER + " " + summary}
+        if start:
+            HISTORY[0] = entry
+        else:
+            HISTORY.insert(0, entry)
+    if not folded:
+        return None
+    return {"folded": folded, "summaries": summaries}
+
+
 def run_chat(message):
     if not INJECTED:
         raise RuntimeError(
             "MonkeyCode LLM was not injected: MCAI_LLM_BASE_URL and "
             "MCAI_LLM_API_KEY are required"
         )
+    message, trimmed = truncate_message(message)
     with HISTORY_LOCK:
+        compress_history()
+
         messages = [SystemMessage(content=SYSTEM_PROMPT)]
         for turn in HISTORY:
             if turn["role"] == "user":
@@ -457,11 +657,20 @@ def run_chat(message):
         else:
             reply, used = run_tool_loop(messages, bound)
 
+        reply, trimmed_reply = truncate_message(reply)
         HISTORY.append({"role": "user", "content": message})
         HISTORY.append({"role": "assistant", "content": reply})
-        if len(HISTORY) > MAX_TURNS * 2:
-            del HISTORY[: len(HISTORY) - MAX_TURNS * 2]
-        return reply, used
+        dropped = evict_history(MAX_TURNS)
+        compress_history()
+        return reply, used, {
+            "trimmed_input": trimmed,
+            "trimmed_reply": trimmed_reply,
+            "evicted": dropped,
+            "compressed_turns": COMPRESSED_TURNS,
+            "history_turns": history_pairs(),
+            "context_tokens": CONTEXT_TOKENS,
+            "history_tokens": history_tokens(HISTORY),
+        }
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -495,6 +704,9 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/info":
                 with HISTORY_LOCK:
                     turns = len(HISTORY) // 2
+                    used_tokens = history_tokens(HISTORY) + count_tokens(SYSTEM_PROMPT)
+                with ARCHIVE_LOCK:
+                    archived = len(ARCHIVE)
                 self.send_json(
                     200,
                     {
@@ -514,6 +726,28 @@ class Handler(BaseHTTPRequestHandler):
                         "tools": [t.name for t in TOOLS],
                         "workspace": WORKSPACE,
                         "history_turns": turns,
+                        "history_tokens": used_tokens,
+                        "context_tokens": CONTEXT_TOKENS,
+                        "max_message_chars": MAX_MESSAGE_CHARS,
+                        "compressed_turns": COMPRESSED_TURNS,
+                        "archived_turns": archived,
+                    },
+                )
+            elif path == "/history":
+                with HISTORY_LOCK:
+                    live = [dict(turn) for turn in HISTORY]
+                    tokens = history_tokens(HISTORY)
+                with ARCHIVE_LOCK:
+                    archived = [dict(entry) for entry in ARCHIVE]
+                self.send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "context_tokens": CONTEXT_TOKENS,
+                        "history_tokens": tokens,
+                        "compressed_turns": COMPRESSED_TURNS,
+                        "history": live,
+                        "archive": archived,
                     },
                 )
             else:
@@ -547,10 +781,15 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(400, {"ok": False, "error": "message is empty"})
             return
         try:
-            reply, tools_used = run_chat(message)
+            reply, tools_used, memory = run_chat(message)
             self.send_json(
                 200,
-                {"ok": True, "reply": reply, "tools_used": tools_used},
+                {
+                    "ok": True,
+                    "reply": reply,
+                    "tools_used": tools_used,
+                    "memory": memory,
+                },
             )
         except Exception as exc:
             self.send_json(

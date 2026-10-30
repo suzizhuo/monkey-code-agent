@@ -214,11 +214,25 @@ GET /info
    "install": true, "android_home": "/opt/android-sdk", "model": "...",
    "llm_host": "...", "via": "mc-direct", "injected": true, "protocol": "...",
    "tools": ["..."], "workspace": "/work", "history_turns": N,
+   "history_tokens": N, "context_tokens": 60000, "max_message_chars": 48000,
+   "compressed_turns": N, "archived_turns": N,
+   "agent": "...", "hostname": "...", "pid": N, "cwd": "/app"}
+
+GET /history
+  {"ok": true, "context_tokens": 60000, "history_tokens": N,
+   "compressed_turns": N,
+   "history": [{"role": "user", "content": "..."}],
+   "archive": [{"role": "...", "content": "...", "reason": "compressed|evicted",
+                "at": "<timestamp>"}],
    "agent": "...", "hostname": "...", "pid": N, "cwd": "/app"}
 
 POST /chat
   request:  {"message": "<user text>"}
   success:  {"ok": true, "reply": "<assistant text>", "tools_used": [],
+             "memory": {"trimmed_input": false, "trimmed_reply": false,
+                        "evicted": 0, "compressed_turns": 0,
+                        "history_turns": 1, "context_tokens": 60000,
+                        "history_tokens": 120},
              "agent": "...", "hostname": "...", "pid": N, "cwd": "/app"}
   empty:    400 {"ok": false, "error": "message is empty"}
   bad json: 400 {"ok": false, "error": "invalid json"}
@@ -230,8 +244,28 @@ before declaring it ready.
 
 ## Memory and system prompt
 
-Chat memory is a SystemMessage plus the last 24 Human/AI pairs. Older turns are
-dropped from the front. history_turns in /info reports the bounded count.
+Chat memory is bounded on three axes:
+
+  1. Turn count: at most 24 Human/AI pairs; older pairs move to the archive with
+     reason "evicted".
+  2. Message size: any message or reply over ISOLIS_MAX_MESSAGE_CHARS (default
+     48000) is truncated head+tail with an explicit marker before it enters
+     memory.
+  3. Token budget: when live history plus system prompt exceeds
+     ISOLIS_CONTEXT_TOKENS (default 60000, 0 disables), the oldest batch (up to 8
+     messages) is folded into one model-written briefing of at most 4000 chars,
+     stored as [compressed history] at the front of history.
+
+Compression rules:
+
+  - The summary keeps facts, paths, commands, versions, decisions, errors and
+    open questions.
+  - At most one [compressed history] entry may exist; a later fold overwrites it
+    in place with prior summary plus new turns.
+  - The newest pair is never folded.
+  - Folded turns go to the archive with reason "compressed".
+
+The archive keeps the newest 400 entries and is never sent to the model.
 
 The system prompt comes from ISOLIS_SYSTEM_PROMPT when set. Otherwise a built-in
 prompt describes the sandbox: isolated container, no host filesystem, no sibling
@@ -239,13 +273,25 @@ containers, no Docker socket; match the user's language; be concise and factual;
 verify by running commands before reporting success. The built-in prompt also
 states whether the active profile allows package installation.
 
+/info reports history_turns, history_tokens, context_tokens, max_message_chars,
+compressed_turns and archived_turns. /chat returns a memory object describing
+trimmed_input, trimmed_reply, evicted, compressed_turns, history_turns,
+context_tokens and history_tokens. GET /history returns the live history and the
+archive.
+
 ## Runtime constants
 
-  MAX_TURNS         24     conversation turns retained per agent
-  MAX_TOOL_STEPS     8     model/tool round trips per chat request
-  SHELL_TIMEOUT    120s    per run_command call
-  INSTALL_TIMEOUT 1800s    per install call
-  MAX_OUTPUT     20000     characters returned by any single tool
+  MAX_TURNS              24     conversation pairs retained per agent
+  MAX_TOOL_STEPS          8     model/tool round trips per chat request
+  SHELL_TIMEOUT         120s    per run_command call
+  INSTALL_TIMEOUT      1800s    per install call
+  MAX_OUTPUT          20000     characters returned by any single tool
+  CONTEXT_TOKENS      60000     token budget before automatic compression
+  MAX_MESSAGE_CHARS   48000     per-message character cap
+  COMPRESS_BATCH          8     oldest messages folded per compression pass
+  SUMMARY_MAX_CHARS    4000     summary length cap
+  SUMMARY_INPUT_CHARS 24000     characters of raw turns fed to the summarizer
+  ARCHIVE_MAX           400     retained archive entries
 
 A tool result longer than MAX_OUTPUT is truncated with an explicit marker. A
 chat that hits MAX_TOOL_STEPS returns a reply instead of looping forever.
@@ -416,6 +462,16 @@ Rules:
  19. Memory stays bounded past 24 pairs and history_turns stays bounded.
  20. One chat stops after at most 8 tool round trips and returns a reply.
  21. A tool result over 20000 chars returns a truncated result with a marker.
+ 22. With ISOLIS_CONTEXT_TOKENS below the live history size, the next chat folds
+     the oldest turns into one [compressed history] entry, compressed_turns
+     rises, and the archive grows.
+ 23. Repeated compression never creates a second [compressed history] entry; the
+     existing summary is updated in place.
+ 24. With ISOLIS_CONTEXT_TOKENS=0 compression is off, the archive only receives
+     "evicted" entries, and the 24-pair cap still holds.
+ 25. A message over ISOLIS_MAX_MESSAGE_CHARS is stored truncated with a marker
+     and /chat reports trimmed_input true.
+ 26. GET /history returns live history and archive with matching counters.
 
 ## Style
 
