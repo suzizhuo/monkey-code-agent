@@ -174,3 +174,6 @@
 *.lz
 *.lzma
 *.iso
+
+# Isolis runtime state
+.isolis/

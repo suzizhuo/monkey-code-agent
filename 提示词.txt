@@ -1,0 +1,151 @@
+# Isolis Prompt Spec
+
+You are documenting and operating Isolis: a host-side TUI that creates isolated LangChain agents in Docker and chats with them.
+
+Source of agent runtime: https://github.com/langchain-ai/langchain
+Host entry: python3 isolis.py
+Agent image: isolis-langchain-agent:latest
+Agent code: agent/server.py
+Agent Dockerfile: agent/Dockerfile
+
+## Goal
+
+1. User types commands in a terminal TUI.
+2. `init` automatically builds/starts one isolated Docker container and creates one Agent inside it.
+3. `chat` talks to that Agent through a localhost HTTP API.
+4. Each Agent is isolated from the host and from other Agents.
+
+## Files
+
+- isolis.py: host TUI / orchestrator. Talks to Docker CLI and to the agent HTTP API.
+- agent/server.py: LangChain ChatOpenAI HTTP runtime inside the container.
+- agent/Dockerfile: python:3.12-slim image, installs langchain-core and langchain-openai, runs as nobody.
+- agent/requirements.txt: langchain-core>=0.3.0,<1.0.0 and langchain-openai>=0.2.0,<1.0.0
+- LLM: default MonkeyCode host injection (MCAI_LLM_*), never a user-specified vendor API in scripts.
+- .isolis/state.json: runtime state, current agent name, container name, host port.
+
+## TUI commands
+
+Interactive:
+  python3 isolis.py
+
+One-shot:
+  python3 isolis.py init [name]
+  python3 isolis.py chat
+  python3 isolis.py use <name>
+  python3 isolis.py status
+  python3 isolis.py rebuild
+  python3 isolis.py stop [name]
+  python3 isolis.py help
+
+Inside Isolis prompt `isolis>`:
+  init [name]   create/start isolated agent container
+  chat          enter conversation TUI with current agent
+  use <name>    switch current agent
+  status        list agents and isolation info
+  rebuild       rebuild image and recreate current agent
+  stop [name]   stop/remove agent container
+  help
+  quit / exit
+
+Inside chat prompt `you>`:
+  plain text    send to agent POST /chat
+  /back         leave chat, keep Isolis
+  /quit         exit Isolis
+  /help
+
+Default agent name is `default`. Names are sanitized to [a-zA-Z0-9_-], max 40 chars.
+Container name = isolis-<name>
+
+## Isolation contract
+
+When creating a container, Isolis MUST:
+
+- Use image isolis-langchain-agent:latest
+- Put the container on dedicated bridge network isolis-net
+- Give it network alias = agent name
+- Do NOT mount host filesystem
+- Do NOT mount Docker socket
+- Root filesystem read-only
+- tmpfs /tmp: rw,noexec,nosuid,size=64m
+- --pids-limit 128
+- --memory 512m
+- --cpus 1.0
+- --security-opt no-new-privileges:true
+- --cap-drop ALL
+- Publish only 127.0.0.1:<hostPort>:8080
+- Run as USER nobody
+- One agent per container
+
+Host port range: 18080-18119, first free port.
+
+## LLM config
+
+Default channel is **MonkeyCode** (host-injected), not 「指定 API」.
+Follow `/Users/yin/Desktop/monkey code/从容器命令行激活.md`.
+
+Agent talks to an OpenAI-compatible HTTP API via LangChain ChatOpenAI using the injected triple:
+
+  MCAI_LLM_BASE_URL    OpenAI base, usually …/v1
+  MCAI_LLM_API_KEY     Bearer (often gk_…)
+  MCAI_LLM_MODEL       default monkeycode-pro/gpt-5.6-terra if empty
+
+Scripts MUST NOT:
+  - ask the user to fill USER_LLM_* / vendor URL / vendor Key / .env API placeholders
+  - set LLM_ACTIVE=api or LLM_UPSTREAM_* to a vendor gateway
+  - hardcode OpenCSG / NVIDIA / other vendor base_url, api_key, or models (auto, step-5-preview, deepseek-chat)
+  - print keys or cat .env
+
+Load order:
+  1. process environment (platform injection)
+  2. never invent a second API
+
+If MCAI_LLM_BASE_URL or MCAI_LLM_API_KEY is missing: fail clearly that the container was not injected; do not fall back to a specified API.
+
+Inject the same MCAI_LLM_* names into the agent container (or ChatOpenAI(base_url=MCAI_LLM_BASE_URL, api_key=MCAI_LLM_API_KEY, model=MCAI_LLM_MODEL)).
+Do not hardcode secrets.
+
+## Agent HTTP API  (inside container, port 8080)
+
+GET /health
+  {"ok": true, "agent": "...", "hostname": "...", "pid": "...", "cwd": "/app"}
+
+GET /info
+  {"ok": true, "framework": "langchain", "source": "https://github.com/langchain-ai/langchain", "model": "...", "history_turns": N, "agent": "...", "hostname": "...", "pid": "...", "cwd": "/app"}
+
+POST /chat
+  request:  {"message": "<user text>"}
+  success:  {"ok": true, "reply": "<assistant text>", "agent": "...", "hostname": "...", "pid": "...", "cwd": "/app"}
+  empty:    400 {"ok": false, "error": "message is empty"}
+  failure:  500 {"ok": false, "error": "...", "trace": "..."}
+
+Chat memory: SystemMessage + last 24 Human/AI turns.
+System prompt: Isolis assistant inside an isolated Docker container built with LangChain; cannot see host filesystem, other agent containers, or Docker socket; match user language; concise and factual.
+
+LLM client:
+  ChatOpenAI(model, api_key, base_url, timeout=60, max_retries=1, temperature=0.4)
+  TIKTOKEN_CACHE_DIR=/tmp
+
+## Host init flow
+
+1. Require docker CLI and running dockerd.
+2. Require MCAI_LLM_BASE_URL and MCAI_LLM_API_KEY (MonkeyCode injection). Do not require a user-specified API.
+3. docker build -t isolis-langchain-agent:latest agent/  if image missing or rebuild.
+4. docker network create isolis-net if missing.
+5. If same-named container exists, docker rm -f it when recreating.
+6. docker run with isolation flags above.
+7. Poll http://127.0.0.1:<port>/health until ok, timeout 45s.
+8. Save state: name, container, port, hostname, created_at. Set current = name.
+
+## Chat flow
+
+1. Ensure current agent container is running; init if needed.
+2. GET /info and print agent name, hostname, model.
+3. Loop: read user line, POST /chat, print reply.
+
+## Style
+
+- Terminal TUI, ASCII only, no emoji.
+- Commands are short.
+- Failures print one clear error.
+- Isolation is the default, not optional.
