@@ -73,7 +73,6 @@ ANDROID_PATH_ENV = (
     "/opt/android-sdk/cmdline-tools/latest/bin:"
     "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 )
-DEFAULT_AGENT_SOURCE = "https://github.com/langchain-ai/langchain"
 STATE_DIR = ".isolis"
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
 AGENT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent")

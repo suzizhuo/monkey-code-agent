@@ -272,7 +272,23 @@ from the base URL, because that client appends its own version path. This rule
 MUST be applied generically and MUST be covered by an acceptance check.
 
 Both client paths MUST use the same timeout, retry count, and temperature so
-behavior is stable across providers.
+behavior is stable across providers. The reference values are:
+
+```
+timeout      60 seconds
+max_retries  1
+temperature  0.4
+max_tokens   4096 (Anthropic-style client)
+```
+
+The probe that negotiates the protocol MUST use a very small token budget (one
+token) and a short timeout (six seconds) so a failed probe never stalls a
+request.
+
+The tokenizer library used by the framework MUST be given a writable cache
+directory inside the container, for example `TIKTOKEN_CACHE_DIR=/tmp`. Without
+it the client may attempt to download tokenizer data into a read-only location
+or to the wrong user's home directory.
 
 ### 5.5 What the agent reports
 
@@ -312,6 +328,18 @@ The image tag MUST be derived from the profile name and the resolved source
 path, so two profiles or two sources never share a stale image. Rebuilding one
 MUST NOT invalidate the other. The tag format MUST be stable across runs for the
 same inputs.
+
+A workable format is:
+
+```
+isolis-agent:<profile>-<short-hash>
+```
+
+where `short-hash` is the first ten hex characters of a digest over the
+resolved source path. Two profiles therefore produce two tags, and the local
+source and a cloned Git source produce two more. The tag is always derivable
+from the recorded `profile` and `source`, so the state file stores those two
+fields and not the tag itself.
 
 ### 6.4 Changing source for a running agent
 
@@ -388,14 +416,28 @@ The in-container server listens on port 8080 and speaks JSON over HTTP/1.1.
 Every JSON response MUST include the common agent fields: agent name, hostname,
 pid, and working directory.
 
+```json
+{
+  "agent": "<agent name>",
+  "hostname": "<container hostname>",
+  "pid": 1,
+  "cwd": "<process working directory>"
+}
+```
+
+`hostname` and `pid` prove that the reply came from the container rather than
+from the host. The host exposes the agent name through the container
+environment; when it is unset the field is an empty string.
+
 ### 8.1 `GET /health`
 
 ```json
-{"ok": true}
+{"ok": true, "agent": "...", "hostname": "...", "pid": 1, "cwd": "/app"}
 ```
 
 Used by the host readiness poll. The host polls until `ok` is `true` or the
-timeout expires.
+timeout expires. The reference readiness window is 45 seconds, polled every
+half second with a three second per-request timeout.
 
 ### 8.2 `GET /info`
 
@@ -445,11 +487,18 @@ Errors:
 ### 8.4 Memory and system prompt
 
 The runtime keeps a system message plus the most recent bounded number of
-user and assistant turns. The system prompt comes from the environment when set
-and otherwise falls back to a built-in prompt describing the sandbox.
+user and assistant turns. The reference bound is the last 24 pairs; older turns
+are discarded from the front. The system prompt comes from the environment when
+set and otherwise falls back to a built-in prompt describing the sandbox,
+including the active profile and whether package installation is available.
+
+The built-in prompt SHOULD tell the model that it runs inside an isolated
+container, cannot see the host filesystem, sibling containers, or the Docker
+socket, and should match the user's language while staying concise and factual.
 
 The system prompt MUST be overridable so different deployments can change agent
-behavior without rebuilding the image.
+behavior without rebuilding the image. The override variable is
+`ISOLIS_SYSTEM_PROMPT`; when it is empty the built-in prompt is used.
 
 ---
 
@@ -488,6 +537,19 @@ Both development tools MUST:
 - Report stdout, stderr, and exit status.
 - Be bounded by a long but finite timeout.
 
+### 9.2.1 Reference runtime constants
+
+These values make the limits auditable. An implementation MAY choose different
+numbers, but it MUST document them and keep every loop and subprocess bounded.
+
+```
+MAX_TURNS         24    conversation turns retained per agent
+MAX_TOOL_STEPS     8    model/tool round trips per chat request
+SHELL_TIMEOUT    120    seconds per run_command call
+INSTALL_TIMEOUT 1800    seconds per install call
+MAX_OUTPUT     20000    characters returned by any single tool
+```
+
 ### 9.3 Image prerequisites for development
 
 The image MUST provide the toolchain these tools rely on:
@@ -500,9 +562,18 @@ The image MUST provide the toolchain these tools rely on:
 - A writable, pre-created `ANDROID_HOME` directory.
 - Environment variables for Java, Android, Gradle, npm, and pip caches.
 
+The container `PATH` MUST include the Android platform tools and command-line
+tools directories before the standard system paths, and it MUST be set at
+container start rather than only at image build time. Setting it at startup
+keeps the build cache intact when the path changes. Shell commands run by tools
+MUST use a non-login shell (`/bin/sh -c`), because a login shell sources
+`/etc/profile` and can reset `PATH`, dropping the Android directories.
+
 The image MUST be based on a distribution release that actually offers the
 required JDK version. Pin the base image to a specific release codename; do not
-rely on a floating default tag whose package set may change.
+rely on a floating default tag whose package set may change. For example,
+`python:3.12-slim` currently resolves to a release whose package set no longer
+ships `openjdk-17`, so the tag must name the release explicitly.
 
 ### 9.4 Android installer contract
 
@@ -650,6 +721,12 @@ A build is complete only when every item below is observable.
 17. State writes survive interruption without corrupting the file.
 18. `rebuild` recreates the current agent with the same profile and source and a
     freshly built image.
+19. Conversation memory stays bounded: after more than 24 user/assistant pairs
+    the agent still answers and `/info` reports a bounded `history_turns`.
+20. A single chat request stops after at most eight tool round trips and returns
+    a reply instead of looping forever.
+21. A tool call that produces more than 20000 characters returns a truncated
+    result with an explicit truncation marker.
 
 ---
 
