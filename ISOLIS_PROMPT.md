@@ -335,11 +335,11 @@ A workable format is:
 isolis-agent:<profile>-<short-hash>
 ```
 
-where `short-hash` is the first ten hex characters of a digest over the
-resolved source path. Two profiles therefore produce two tags, and the local
-source and a cloned Git source produce two more. The tag is always derivable
-from the recorded `profile` and `source`, so the state file stores those two
-fields and not the tag itself.
+where `short-hash` is the first ten hex characters of a digest over the profile
+name and the resolved source path. Two profiles therefore produce two tags, and
+the local source and a cloned Git source produce two more. The tag is always
+derivable from the recorded `profile` and `source`, so the state file stores
+those two fields and not the tag itself.
 
 ### 6.4 Changing source for a running agent
 
