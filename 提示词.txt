@@ -1,505 +1,111 @@
 # Isolis Prompt Spec
-
-You are documenting and operating Isolis: a host-side TUI that creates isolated
-LangChain agents in Docker and chats with them.
-
-Host entry: python3 isolis.py
-Agent code: agent/server.py
-Agent Dockerfile: agent/Dockerfile
-Android installer: agent/install-android-sdk.sh
-Agent image: isolis-agent:<profile>-<source-hash>
-State file: .isolis/state.json
-
-## Goal
-
-1. User types commands in a terminal TUI.
-2. `init` builds or reuses an image, starts one isolated Docker container and
-   creates one Agent inside it.
-3. `chat` talks to that Agent through a loopback HTTP API.
-4. Each Agent is isolated from the host and from other Agents.
-
-Two goals are mandatory and pull in opposite directions:
-
-- Strong isolation by default.
-- Real development work: install SDKs and build tools inside the container.
-
-## Files
-
-- isolis.py: host TUI and orchestrator. Talks to the Docker CLI and to the agent
-  HTTP API. Standard library only.
-- agent/server.py: provider-neutral LangChain HTTP runtime inside the container.
-- agent/Dockerfile: pinned base image with the full toolchain.
-- agent/requirements.txt: LangChain client packages plus Playwright.
-- agent/install-android-sdk.sh: idempotent Android command-line tools installer.
-- .isolis/state.json: runtime state, agents, current agent, host ports.
-- .isolis/agent-src/: cloned third-party agent sources.
-
-## TUI commands
-
-Interactive:
-  python3 isolis.py
-
-One-shot:
-  python3 isolis.py setup
-  python3 isolis.py doctor
-  python3 isolis.py init [name]
-  python3 isolis.py chat
-  python3 isolis.py use <name>
-  python3 isolis.py status
-  python3 isolis.py rebuild
-  python3 isolis.py stop [name]
-  python3 isolis.py profiles
-  python3 isolis.py help
-
-Inside the Isolis prompt `isolis>`:
-  setup         prepare Docker, mirror, image and network
-  doctor        check environment and report problems
-  init [name]   build and start an isolated agent
-  chat          enter conversation with the current agent
-  use <name>    switch current agent
-  status        list agents and isolation info
-  rebuild       rebuild image and recreate current agent
-  stop [name]   stop/remove agent container
-  profiles      list capability profiles
-  help
-  quit / exit
-
-Inside the chat prompt `you>`:
-  plain text    send to agent POST /chat
-  /back         leave chat, keep Isolis
-  /quit         exit Isolis
-  /help
-
-## Options
-
-`init`, `setup` and `rebuild` accept:
-
-  --profile strict|tooled     capability level (default tooled)
-  --source <local|git-url>    agent source (default local)
-  --model <name>              override the injected model
-
-Unknown options and missing option values are rejected with one clear line.
-
-## Names and ports
-
-Default agent name is `default`. Names are sanitized to [A-Za-z0-9_-], runs of
-separators collapsed, trimmed, max 40 chars. A changed name prints one notice.
-Container name = isolis-<name>.
-
-Host port range: 18080-18119, first free port. A port is skipped when it is
-recorded in state, published by any Docker container, or already listening.
-Exhausting the range is a clear error.
-
-## Capability profiles
-
-Every profile shares these invariants:
-
-- Dedicated bridge network isolis-net with inter-container communication off.
-- Network alias equal to the agent name.
-- Exactly one published port, bound to 127.0.0.1 only.
-- No host filesystem mount.
-- No Docker socket.
-- tmpfs for /tmp, /work and /dev/shm.
-- --security-opt no-new-privileges:true
-- --cap-drop ALL, then only the profile allowlist.
-- Memory, cpu and pid limits.
-- One agent per container.
-
-strict (safe default for untrusted work):
-  read-only root, user nobody, no capabilities,
-  memory 512m, cpus 1.0, pids 128, /work 512m, /tmp 64m, /dev/shm 64m,
-  package installation disabled.
-
-tooled (default profile):
-  writable root inside the container, user 0:0,
-  caps CHOWN,DAC_OVERRIDE,FOWNER,SETUID,SETGID,SETFCAP,
-  memory 4g, cpus 2.0, pids 512, /work 2g, /tmp 512m, /dev/shm 512m,
-  package installation enabled.
-
-The profile is declared as data in isolis.py. It is injected into the container
-as ISOLIS_PROFILE and ISOLIS_INSTALL, shown by `status`, listed by `profiles`,
-and reported by /info. A profile never uses --privileged, never adds SYS_ADMIN,
-and never mounts the Docker socket.
-
-Changing the profile or source of an existing agent name recreates the container
-and updates the state record with one notice line.
-
-## Image identity
-
-The tag is derived from the profile name and the resolved source path:
-
-  isolis-agent:<profile>-<short-hash>
-
-where short-hash is the first ten hex chars of a sha256 over the profile name and
-the resolved source path. Two profiles therefore produce two tags, and the local
-source and a cloned git source produce two more. Rebuilding one never
-invalidates the other. The tag
-is always derivable from the recorded profile and source, so state stores those
-two fields and not the tag.
-
-## LLM config
-
-Default channel is MonkeyCode (host-injected). There is no user-specified vendor
-API and no second credential source.
-
-The agent receives its model access through environment variables injected by
-the host platform:
-
-  MCAI_LLM_BASE_URL    provider base URL, often ending in /v1
-  MCAI_LLM_API_KEY     bearer credential
-  MCAI_LLM_MODEL       model identifier
-
-The host forwards these names into the container and never prints the key value.
-Only key length and a short prefix may appear in diagnostics.
-
-Model selection order:
-
-  1. ISOLIS_MODEL
-  2. MCAI_LLM_MODEL
-  3. first advertised model sharing the platform prefix
-  4. ISOLIS_DEFAULT_MODEL
-  5. built-in fallback constant
-
-Blocked identifiers {auto, step-5-preview, deepseek-chat} are skipped during
-selection rather than causing a failure.
-
-Scripts MUST NOT:
-
-  - ask the user to fill USER_LLM_* / vendor URL / vendor Key / .env placeholders
-  - set LLM_ACTIVE=api or LLM_UPSTREAM_* to a vendor gateway
-  - hardcode any vendor base_url, api_key or model
-  - print keys or cat .env
-
-If MCAI_LLM_BASE_URL or MCAI_LLM_API_KEY is missing, init/setup/chat/rebuild fail
-with one clear message that the LLM was not injected. They never fall back to a
-different provider or a locally invented key.
-
-## Protocol negotiation
-
-The gateway may speak an OpenAI-style or an Anthropic-style HTTP API. The
-runtime detects which one works before building a client:
-
-  1. Probe /chat/completions with one token and a 6s timeout.
-  2. HTTP 404 or 405 selects the Anthropic-style client.
-  3. Otherwise select the OpenAI-style client.
-  4. Cache the decision for the process lifetime.
-
-When the Anthropic-style client is selected, a trailing /v1 is removed from the
-base URL because that client appends its own version path.
-
-Both client paths use the same values:
-
-  timeout       60s
-  max_retries   1
-  temperature   0.4
-  max_tokens    4096 (Anthropic-style client)
-
-TIKTOKEN_CACHE_DIR=/tmp is set in the image so tokenizer data has a writable
-home and never lands in a read-only path.
-
-## Agent HTTP API (inside container, port 8080)
-
-Every response carries the common fields:
-
-  {"agent": "...", "hostname": "...", "pid": N, "cwd": "/app"}
-
-hostname and pid prove the reply came from the container, not the host.
-
-GET /health
-  {"ok": true, "agent": "...", "hostname": "...", "pid": N, "cwd": "/app"}
-  Host polls every 0.5s with a 3s per-request timeout, 45s readiness window.
-
-GET /info
-  {"ok": true, "framework": "langchain", "source": "...", "profile": "...",
-   "install": true, "android_home": "/opt/android-sdk", "model": "...",
-   "llm_host": "...", "via": "mc-direct", "injected": true, "protocol": "...",
-   "tools": ["..."], "workspace": "/work", "history_turns": N,
-   "history_tokens": N, "context_tokens": 900000, "context_hard_limit": 1000000,
-   "max_message_chars": 900000, "max_turns": 400, "compress_batch": 40,
-   "compressed_turns": N, "archived_turns": N,
-   "agent": "...", "hostname": "...", "pid": N, "cwd": "/app"}
-
-GET /history
-  {"ok": true, "context_tokens": 900000, "history_tokens": N,
-   "compressed_turns": N,
-   "history": [{"role": "user", "content": "..."}],
-   "archive": [{"role": "...", "content": "...", "reason": "compressed|evicted",
-                "at": "<timestamp>"}],
-   "agent": "...", "hostname": "...", "pid": N, "cwd": "/app"}
-
-POST /chat
-  request:  {"message": "<user text>"}
-  success:  {"ok": true, "reply": "<assistant text>", "tools_used": [],
-             "memory": {"trimmed_input": false, "trimmed_reply": false,
-                        "evicted": 0, "compressed_turns": 0,
-                        "history_turns": 1, "context_tokens": 900000,
-                        "history_tokens": 120},
-             "agent": "...", "hostname": "...", "pid": N, "cwd": "/app"}
-  empty:    400 {"ok": false, "error": "message is empty"}
-  bad json: 400 {"ok": false, "error": "invalid json"}
-  unknown:  404 {"ok": false, "error": "not found"}
-  failure:  500 {"ok": false, "error": "...", "trace": "..."}
-
-The host rejects an agent whose /info does not confirm injection and route
-before declaring it ready.
-
-## Memory and system prompt
-
-Chat memory is bounded on three axes:
-
-  1. Turn count: at most ISOLIS_MAX_TURNS Human/AI pairs (default 400); older
-     pairs move to the archive with reason "evicted".
-  2. Message size: any message or reply over ISOLIS_MAX_MESSAGE_CHARS (default
-     900000) is truncated head+tail with an explicit marker before it enters
-     memory.
-  3. Token budget: when live history plus system prompt exceeds
-     ISOLIS_CONTEXT_TOKENS (default 900000, 0 disables), the oldest batch
-     (ISOLIS_COMPRESS_BATCH, default 40 messages) is folded into one model-written
-     briefing of at most 8000 chars, stored as [compressed history] at the front
-     of history. A budget above ISOLIS_CONTEXT_HARD_LIMIT (default 1000000, the
-     measured upstream ceiling) is clamped with one notice line.
-
-Compression rules:
-
-  - The summary keeps facts, paths, commands, versions, decisions, errors and
-    open questions.
-  - At most one [compressed history] entry may exist; a later fold overwrites it
-    in place with prior summary plus new turns.
-  - The newest pair is never folded.
-  - Folded turns go to the archive with reason "compressed".
-
-The archive keeps the newest 400 entries and is never sent to the model.
-
-The system prompt comes from ISOLIS_SYSTEM_PROMPT when set. Otherwise a built-in
-prompt describes the sandbox: isolated container, no host filesystem, no sibling
-containers, no Docker socket; match the user's language; be concise and factual;
-verify by running commands before reporting success. The built-in prompt also
-states whether the active profile allows package installation.
-
-/info reports history_turns, history_tokens, context_tokens, max_message_chars,
-compressed_turns and archived_turns. /chat returns a memory object describing
-trimmed_input, trimmed_reply, evicted, compressed_turns, history_turns,
-context_tokens and history_tokens. GET /history returns the live history and the
-archive.
-
-## Runtime constants
-
-  MAX_TURNS             400     conversation pairs retained per agent
-  MAX_TOOL_STEPS          8     model/tool round trips per chat request
-  SHELL_TIMEOUT         120s    per run_command call
-  INSTALL_TIMEOUT      1800s    per install call
-  MAX_OUTPUT          20000     characters returned by any single tool
-  CONTEXT_TOKENS     900000     token budget before automatic compression
-  CONTEXT_HARD_LIMIT 1000000    measured upstream ceiling; budget is clamped
-  MAX_MESSAGE_CHARS  900000     per-message character cap
-  COMPRESS_BATCH         40     oldest messages folded per compression pass
-  SUMMARY_MAX_CHARS    8000     summary length cap
-  SUMMARY_INPUT_CHARS 60000     characters of raw turns fed to the summarizer
-  ARCHIVE_MAX          4000     retained archive entries
-
-A tool result longer than MAX_OUTPUT is truncated with an explicit marker. A
-chat that hits MAX_TOOL_STEPS returns a reply instead of looping forever.
-
-## Agent tools
-
-Baseline tools in every profile:
-
-- run_command: non-interactive shell command with /work as cwd, returns stdout,
-  stderr and exit status. Uses /bin/sh -c (non-login shell) so /etc/profile
-  cannot reset PATH and drop the Android directories.
-- write_file: write text into a path inside /work, creating parent directories.
-- read_file: read a text file inside /work.
-- list_files: list a directory inside /work.
-- browse: open a URL in headless Chromium, return title and visible text, and
-  optionally save a screenshot into /work.
-
-File tools reject paths that resolve outside /work.
-
-Development tools in the tooled profile only:
-
-- install_packages(manager, packages): manager is one of apt, pip, npm. The
-  package string is whitespace-normalized. apt runs with
-  DEBIAN_FRONTEND=noninteractive and --no-install-recommends; pip uses
-  --no-cache-dir; npm installs globally.
-- install_android_sdk(packages): runs the bundled installer to place the Android
-  command-line tools under ANDROID_HOME. Default packages are platform-tools,
-  platforms;android-34, build-tools;34.0.0.
-
-Both development tools refuse to run under the strict profile, report stdout,
-stderr and exit status, and are bounded by INSTALL_TIMEOUT.
-
-## Image prerequisites
-
-The image provides:
-
-- Pinned base python:3.12-slim-bookworm. The base must name a release whose
-  package set ships the required JDK; a floating tag can drift to a release that
-  no longer has openjdk-17.
-- openjdk-17-jdk-headless, build-essential, pkg-config, cmake.
-- git, curl, wget, ripgrep, jq, unzip, zip, xz-utils, tar, less, vim-tiny, nano,
-  procps, psmisc, file, tree, rsync, openssh-client, gnupg, tini.
-- nodejs and npm.
-- Python with pip.
-- Playwright Chromium.
-- A writable pre-created ANDROID_HOME at /opt/android-sdk.
-- Env for JAVA_HOME, ANDROID_HOME, ANDROID_SDK_ROOT, GRADLE_USER_HOME,
-  NPM_CONFIG_CACHE, PIP_CACHE_DIR, TIKTOKEN_CACHE_DIR=/tmp, HOME=/tmp.
-
-Android PATH (platform-tools, cmdline-tools/latest/bin, then system paths) is
-injected at container start, not only baked into the image, so changing it does
-not invalidate the build cache.
-
-## Android installer contract
-
-The installer:
-
-- Verifies Java, curl and unzip exist before doing work.
-- Skips the download when the SDK manager already exists.
-- Accepts CMDLINE_VERSION to override the command-line tools archive.
-- Accepts ANDROID_PACKAGES to override the package list.
-- Accepts licenses non-interactively.
-- Is safe to run more than once.
-
-## Agent source selection
-
-An empty source, `local` or `builtin` selects the local agent/ directory. Any
-other value is a git URL:
-
-  - Cloned shallowly into .isolis/agent-src/<slug>/.
-  - Updated later with a fast-forward pull; a non-fast-forward is reported
-    instead of discarding local work.
-  - Must contain a Dockerfile; a missing one is an error naming the source.
-
-Source precedence: --source, then ISOLIS_AGENT_SOURCE, then local.
-
-## Host init flow
-
-  1. Require docker CLI and a running dockerd.
-  2. Require MCAI_LLM_BASE_URL and MCAI_LLM_API_KEY. Never require a
-     user-specified API.
-  3. Ensure the container registry is reachable; add a mirror only when Docker
-     Hub is blocked and no mirror is configured.
-  4. Ensure network isolis-net exists.
-  5. Resolve profile and source, build or reuse isolis-agent:<profile>-<hash>.
-  6. If a same-named container exists with matching profile and source, reuse it
-     when healthy; otherwise remove and recreate it.
-  7. docker run with the profile isolation flags.
-  8. Poll http://127.0.0.1:<port>/health until ok, 45s timeout.
-  9. Verify /info confirms injection and route.
- 10. Save state: name, container, port, hostname, model, profile, source,
-     created_at. Set current = name.
- 11. Print the ready line with port and image tag.
-
-Any failure after container start removes the container and reports the last
-container log line.
-
-## Chat flow
-
-  1. Ensure the current agent container is running; init if needed, preserving
-     its recorded profile and source.
-  2. GET /info and print one line: profile, hostname, model, host, route, plus
-     the tool list.
-  3. Loop: read a line, POST /chat, print the reply.
-
-## setup and doctor
-
-setup:
-  1. Verify the Docker CLI exists.
-  2. Resolve the LLM configuration.
-  3. Probe Docker Hub; add a mirror only if blocked and none configured. Leave an
-     unreadable daemon config untouched.
-  4. Ensure the daemon is running, starting it detached as root when needed.
-  5. Build the image for the profile and source.
-  6. Create the network if missing.
-  7. Print profile, source, image tag and network. Never start an agent.
-  The whole operation is idempotent.
-
-doctor:
-  Prints [ok], [warn] and [fail] lines for docker CLI, daemon, registry or
-  mirror, LLM variables and resolved model with key length and prefix (never the
-  key), local agent sources, profile and install flag, agent source, image
-  presence, network presence, and state readability.
-  Exits zero when there is no [fail] line, non-zero otherwise. [warn] never
-  affects the exit code.
-
-## State file schema
-
-  {"version": 1,
-   "current": "<name or null>",
-   "agents": {"<name>": {"name": "...", "container": "isolis-<name>",
-                         "port": 18080, "hostname": "...", "model": "...",
-                         "profile": "...", "source": "...",
-                         "created_at": "<UTC timestamp>"}}}
-
-Rules:
-
-- A missing file yields an empty valid state.
-- Unreadable or malformed JSON is an error, not a silent reset.
-- Writes are atomic: temp file, flush, fsync, os.replace.
-- version stays 1; profile and source are additive fields.
-
-## Acceptance criteria
-
-  1. doctor exits zero with valid injection and non-zero without it.
-  2. profiles lists both profiles with correct install flags and limits.
-  3. strict container runs as nobody, read-only root, no caps, no install tools.
-  4. tooled container runs as root, six caps and no others, install true, seven
-     tools.
-  5. Installing packages under strict returns a clear refusal and changes nothing.
-  6. Under tooled, install_packages("apt", "<package>") succeeds and the binary
-     runs through run_command.
-  7. Under tooled, install_android_sdk completes and adb version succeeds.
-  8. Re-running the Android installer skips the existing SDK manager.
-  9. init --source <git-url> clones, builds a tagged image, and /info reports the
-     source.
- 10. A second init from the same source updates the clone and reuses the image.
- 11. Changing profile or source recreates the container and updates state.
- 12. Protocol negotiation works against a provider needing a stripped /v1.
- 13. ISOLIS_MODEL beats MCAI_LLM_MODEL; a blocked model is skipped, not fatal.
- 14. /info reflects profile, install flag, source, tools and android_home.
- 15. Container invariants hold in every profile: one loopback port, no host
-     mounts, no Docker socket, tmpfs workspace, resource limits,
-     no-new-privileges.
- 16. stop removes the container and updates state; status reflects it.
- 17. State writes survive interruption without corruption.
- 18. rebuild recreates the current agent with the same profile and source.
- 19. Memory stays bounded past ISOLIS_MAX_TURNS pairs and history_turns stays
-     bounded.
- 20. One chat stops after at most 8 tool round trips and returns a reply.
- 21. A tool result over 20000 chars returns a truncated result with a marker.
- 22. With ISOLIS_CONTEXT_TOKENS below the live history size, the next chat folds
-     the oldest turns into one [compressed history] entry, compressed_turns
-     rises, and the archive grows.
- 23. Repeated compression never creates a second [compressed history] entry; the
-     existing summary is updated in place.
- 24. With ISOLIS_CONTEXT_TOKENS=0 compression is off, the archive only receives
-     "evicted" entries, and the turn cap still holds.
- 25. A message over ISOLIS_MAX_MESSAGE_CHARS is stored truncated with a marker
-     and /chat reports trimmed_input true.
- 26. GET /history returns live history and archive with matching counters.
- 27. A budget above 1000000 is clamped with one notice line and /info reports
-     the clamped context_tokens plus context_hard_limit.
- 28. A 600000-character message (about 169000 tokens) is accepted and answered
-     without 413 or 5xx.
- 29. After exceeding the budget with large inputs, compression shrinks the live
-     history and a fact from the first message is still recoverable.
-
-## Style
-
-- Terminal TUI, ASCII only, no emoji.
-- Commands are short.
-- Failures print one clear error naming the next step.
-- Isolation is the default, not optional.
-- Never print secrets.
-
-## Known constraints
-
-- The host uses only the Python standard library and the Docker CLI. Agent
-  framework code stays inside the container.
-- The only model upstream is the injected platform gateway.
-- tooled trades a writable container filesystem for development capability. It
-  still shares no host path, holds no Docker socket, and cannot reach sibling
-  containers because inter-container communication is disabled.
-- SDK and build caches live under tmpfs and do not survive container removal.
-  Recreating an agent re-downloads them. This is accepted in exchange for never
-  writing agent state to the host.
+Host TUI creating isolated LangChain agents in Docker. Dual mandate: strong isolation by default; real development (SDKs/build tools inside container).
+python3 isolis.py | agent/server.py | agent/Dockerfile | agent/install-android-sdk.sh | agent/requirements.txt (LangChain+Playwright) | isolis-agent:<profile>-<source-hash> | .isolis/state.json | .isolis/agent-src/
+isolis.py: host TUI/orchestrator; Docker CLI + agent HTTP; stdlib only. agent/server.py: provider-neutral LangChain HTTP runtime.
+
+## Cmds
+python3 isolis.py [setup|doctor|init [name]|chat|use <name>|status|rebuild|stop [name]|profiles|help]
+isolis>: same + quit/exit. setup=Docker/mirror/image/network. you>: text->POST /chat | /back | /quit | /help
+init/setup/rebuild: --profile strict|tooled (default tooled) --source <local|git-url> (default local) --model <name>
+Unknown options/missing values: one-line reject.
+
+## Names/ports
+Default name default. Sanitize [A-Za-z0-9_-], collapse separators, trim, max 40. Changed name: one notice. Container isolis-<name>.
+Ports 18080-18119 first free. Skip if in state, published, or listening. Exhausted: error.
+
+## Profiles
+Invariants: isolis-net bridge icc-off; alias=name; one port 127.0.0.1; no host mount; no Docker socket; tmpfs /tmp /work /dev/shm; no-new-privileges; cap-drop ALL then allowlist; mem/cpu/pid limits; one agent/container. Never --privileged, SYS_ADMIN, Docker socket.
+strict: ro root, nobody, no caps; 512m/1cpu/pids128 /work512m /tmp64m /shm64m; install off.
+tooled (default): rw root 0:0; CHOWN,DAC_OVERRIDE,FOWNER,SETUID,SETGID,SETFCAP; 4g/2cpu/pids512 /work2g /tmp512m /shm512m; install on.
+Data in isolis.py; inject ISOLIS_PROFILE, ISOLIS_INSTALL; shown by status/profiles//info.
+Changing profile/source of existing name: recreate container, update state, one notice.
+
+## Image tag
+isolis-agent:<profile>-<10hex sha256(profile+resolved source path)>. Distinct profile/source => distinct tags. State stores profile+source, not tag.
+
+## LLM
+MonkeyCode host-injected only. Env: MCAI_LLM_BASE_URL (often /v1), MCAI_LLM_API_KEY, MCAI_LLM_MODEL. Forward names; never print key (diag: length+prefix).
+Order: ISOLIS_MODEL > MCAI_LLM_MODEL > first advertised with platform prefix > ISOLIS_DEFAULT_MODEL > built-in. Skip blocked {auto, step-5-preview, deepseek-chat}.
+MUST NOT: ask USER_LLM_*/vendor URL/Key/.env; set LLM_ACTIVE=api or LLM_UPSTREAM_* vendor; hardcode vendor base_url/api_key/model; print keys/cat .env.
+Missing BASE_URL or API_KEY: init/setup/chat/rebuild fail one line "LLM not injected". No other-provider/invented-key fallback.
+
+## Protocol
+Detect OpenAI vs Anthropic before client: probe /chat/completions 1 token 6s; 404/405=Anthropic else OpenAI; cache process-lifetime. Anthropic: strip trailing /v1.
+timeout 60s, max_retries 1, temperature 0.4, max_tokens 4096 (Anthropic). TIKTOKEN_CACHE_DIR=/tmp.
+
+## HTTP :8080
+Common: {agent,hostname,pid,cwd:"/app"}; hostname+pid prove container origin.
+GET /health {ok,agent,hostname,pid,cwd}. Poll 0.5s, 3s/req, 45s ready.
+GET /info {ok,framework:"langchain",source,profile,install,android_home:"/opt/android-sdk",model,llm_host,via:"mc-direct",injected,protocol,tools[],workspace:"/work",history_turns,history_tokens,context_tokens:900000,context_hard_limit:1000000,max_message_chars:900000,max_turns:400,compress_batch:40,compressed_turns,archived_turns,+common}
+GET /history {ok,context_tokens,history_tokens,compressed_turns,history[{role,content}],archive[{role,content,reason:"compressed|evicted",at}],+common}
+POST /chat {message}; ok {ok,reply,tools_used:[],memory:{trimmed_input,trimmed_reply,evicted,compressed_turns,history_turns,context_tokens,history_tokens},+common}; 400 empty/"invalid json"; 404 "not found"; 500 error+trace.
+Ready only if /info confirms injection+route.
+
+## Memory
+MAX_TURNS 400 | MAX_TOOL_STEPS 8 | SHELL_TIMEOUT 120s | INSTALL_TIMEOUT 1800s | MAX_OUTPUT 20000 | CONTEXT_TOKENS 900000 | CONTEXT_HARD_LIMIT 1000000 | MAX_MESSAGE_CHARS 900000 | COMPRESS_BATCH 40 | SUMMARY_MAX_CHARS 8000 | SUMMARY_INPUT_CHARS 60000 | ARCHIVE_MAX 4000
+1. Turns: ISOLIS_MAX_TURNS pairs; older archive "evicted".
+2. Size: >ISOLIS_MAX_MESSAGE_CHARS head+tail truncate with marker.
+3. Tokens: live+system >ISOLIS_CONTEXT_TOKENS (0=off) fold oldest COMPRESS_BATCH into <=8000-char [compressed history] at front. Budget >HARD_LIMIT clamped, one notice.
+Compress: keep facts/paths/commands/versions/decisions/errors/open questions; one [compressed history] overwritten in place; newest pair never folded; folded -> archive "compressed". Archive newest 400, never sent to model. Tool >MAX_OUTPUT truncated with marker. MAX_TOOL_STEPS => return reply.
+Prompt: ISOLIS_SYSTEM_PROMPT or built-in (isolated, no host FS/siblings/Docker socket; match language; concise/factual; verify via commands; states install allowed).
+
+## Tools
+All: run_command (cwd /work, stdout/stderr/exit, /bin/sh -c non-login so /etc/profile cannot reset PATH); write_file/read_file/list_files in /work (write mkdirs; reject outside /work); browse headless Chromium title+text, optional /work screenshot.
+tooled: install_packages(apt|pip|npm, pkgs whitespace-normalized; apt DEBIAN_FRONTEND=noninteractive --no-install-recommends; pip --no-cache-dir; npm -g); install_android_sdk(pkgs) under ANDROID_HOME default platform-tools, platforms;android-34, build-tools;34.0.0. Both refuse in strict; stdout/stderr/exit; INSTALL_TIMEOUT.
+
+## Image
+python:3.12-slim-bookworm pinned (must ship JDK; floating tag can lose openjdk-17).
+openjdk-17-jdk-headless build-essential pkg-config cmake git curl wget ripgrep jq unzip zip xz-utils tar less vim-tiny nano procps psmisc file tree rsync openssh-client gnupg tini nodejs npm Python+pip Playwright Chromium.
+ANDROID_HOME=/opt/android-sdk writable. Env JAVA_HOME ANDROID_HOME ANDROID_SDK_ROOT GRADLE_USER_HOME NPM_CONFIG_CACHE PIP_CACHE_DIR TIKTOKEN_CACHE_DIR=/tmp HOME=/tmp.
+Android PATH (platform-tools, cmdline-tools/latest/bin, system) injected at start so PATH changes skip rebuild.
+Installer: require Java/curl/unzip; skip download if sdkmanager exists; CMDLINE_VERSION, ANDROID_PACKAGES overrides; licenses non-interactive; idempotent.
+
+## Source
+empty/local/builtin -> agent/. Else git: shallow clone .isolis/agent-src/<slug>/; later ff-pull (non-ff reported, keep local); Dockerfile required. Precedence: --source, ISOLIS_AGENT_SOURCE, local.
+
+## Flows
+Init: docker CLI+dockerd; MCAI_LLM_BASE_URL+API_KEY (no user API); registry reachable, mirror only if Hub blocked and none set; isolis-net; resolve profile+source, build/reuse tag; same-name matching profile+source reuse if healthy else recreate; docker run isolation flags; poll /health 45s; /info injection+route; save name,container,port,hostname,model,profile,source,created_at current=name; print ready port+tag. Fail after start: remove container, last log line.
+Chat: ensure running (init keeping profile+source); GET /info one line profile/hostname/model/host/route/tools; loop POST /chat print reply.
+setup idempotent, never starts agent: Docker CLI; LLM; Hub probe, mirror only if blocked/none, leave unreadable daemon.json; daemon (start detached root if needed); build; network; print profile/source/tag/network.
+doctor [ok]/[warn]/[fail]: CLI, daemon, registry/mirror, LLM vars+model key-len+prefix, local sources, profile+install, source, image, network, state. Exit 0 iff no [fail].
+
+## State
+{"version":1,"current":"<name|null>","agents":{"<name>":{"name","container":"isolis-<name>","port":18080,"hostname","model","profile","source","created_at":"<UTC>"}}}
+Missing=empty valid. Bad JSON=error. Atomic: temp+flush+fsync+os.replace. version=1; profile+source additive.
+
+## Accept
+1 doctor 0 with injection else nonzero
+2 profiles both, correct install+limits
+3 strict: nobody, ro, no caps, no install tools
+4 tooled: root, exactly 6 caps, install true, 7 tools
+5 strict install: refuse, no change
+6 tooled apt install + binary via run_command
+7 tooled install_android_sdk + adb version
+8 re-run installer skips existing sdkmanager
+9 init --source git clones, tagged image, /info source
+10 second same source: update clone, reuse image
+11 profile/source change recreates+updates state
+12 protocol vs provider needing stripped /v1
+13 ISOLIS_MODEL > MCAI_LLM_MODEL; blocked skip
+14 /info profile,install,source,tools,android_home
+15 all profiles: 1 loopback port, no host mounts, no docker.sock, tmpfs, limits, no-new-privileges
+16 stop removes+updates; status reflects
+17 state writes survive interrupt
+18 rebuild same profile+source
+19 memory bounded past MAX_TURNS; history_turns bounded
+20 <=8 tool trips then reply
+21 tool >20000 truncated+marker
+22 CONTEXT_TOKENS < live: fold one [compressed history]; compressed_turns+; archive+
+23 no second [compressed history]; in-place
+24 CONTEXT_TOKENS=0: no compress; archive only evicted; turn cap holds
+25 over MAX_MESSAGE_CHARS truncated+marker; trimmed_input true
+26 GET /history live+archive matching counters
+27 budget>1e6 clamped one notice; /info clamped context_tokens + hard_limit
+28 600000-char (~169k tok) answered, no 413/5xx
+29 after over-budget, compress shrinks live; first-message fact recoverable
+
+## Style/limits
+TUI ASCII no emoji. Short cmds. One-line errors naming next step. Isolation default. Never print secrets.
+Host: stdlib+Docker CLI. Agent framework in container. Only upstream: injected gateway.
+tooled: rw container FS; no host path, no docker.sock, no siblings (icc off).
+SDK/build caches on tmpfs, gone on remove; recreate re-downloads. Agent state never written to host.
