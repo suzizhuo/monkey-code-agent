@@ -83,6 +83,48 @@ class IsolisError(Exception):
     pass
 
 
+def configure_stdio():
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
+def safe_text(value):
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        value = str(value)
+    try:
+        value.encode("utf-8")
+        return value
+    except UnicodeEncodeError:
+        try:
+            raw = value.encode("utf-8", "surrogateescape")
+        except Exception:
+            return value.encode("utf-8", "replace").decode("utf-8")
+        for encoding in ("utf-8", "gb18030"):
+            try:
+                return raw.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        return raw.decode("utf-8", "replace")
+
+
+def json_sanitize(value):
+    if isinstance(value, str):
+        return safe_text(value)
+    if isinstance(value, dict):
+        return {safe_text(str(key)): json_sanitize(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [json_sanitize(item) for item in value]
+    return value
+
+
 def announce_name(raw, name):
     if raw is not None and name != raw:
         print("notice: agent name sanitized to '%s'" % name)
@@ -305,8 +347,8 @@ def http_json(method, url, payload=None, timeout=15, token=None):
     data = None
     headers = {"Accept": "application/json"}
     if payload is not None:
-        data = json.dumps(payload).encode("utf-8")
-        headers["Content-Type"] = "application/json"
+        data = json.dumps(json_sanitize(payload), ensure_ascii=False).encode("utf-8")
+        headers["Content-Type"] = "application/json; charset=utf-8"
     if token:
         headers["Authorization"] = "Bearer " + token
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
@@ -323,7 +365,7 @@ def http_json(method, url, payload=None, timeout=15, token=None):
     except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:
         raise IsolisError("request failed: %s (%s)" % (url, exc))
     try:
-        body = json.loads(raw.decode("utf-8")) if raw else {}
+        body = json.loads(raw.decode("utf-8", "replace")) if raw else {}
     except (ValueError, UnicodeDecodeError):
         body = {}
     return status, body
@@ -693,6 +735,12 @@ def start_container(name, container, port, llm, profile="tooled",
         cfg["user"],
         "-e",
         "HOME=/tmp",
+        "-e",
+        "LANG=C.UTF-8",
+        "-e",
+        "LC_ALL=C.UTF-8",
+        "-e",
+        "PYTHONIOENCODING=utf-8",
         "-e",
         ANDROID_PATH_ENV,
         "-e",
@@ -1201,7 +1249,7 @@ def chat_loop(port):
     print("type /back to return, /quit to exit, /help for help")
     while True:
         try:
-            line = input("you> ")
+            line = safe_text(input("you> "))
         except (EOFError, KeyboardInterrupt):
             print()
             return "back"
@@ -1221,10 +1269,12 @@ def chat_loop(port):
             continue
         try:
             reply = chat_request(port, text)
-            print(reply)
+            print(safe_text(reply))
         except KeyboardInterrupt:
             print()
             return "back"
+        except Exception as err:
+            print("error: %s" % safe_text(str(err)))
         except IsolisError as exc:
             print("error: %s" % exc)
 
@@ -1349,7 +1399,7 @@ def repl():
     print("isolis - isolated LangChain agents (type: help)")
     while True:
         try:
-            line = input("isolis> ")
+            line = safe_text(input("isolis> "))
         except (EOFError, KeyboardInterrupt):
             print()
             return 0
@@ -1377,6 +1427,7 @@ def repl():
 
 
 def main(argv):
+    configure_stdio()
     if len(argv) <= 1:
         return repl()
     command = argv[1].lower()

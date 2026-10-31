@@ -102,6 +102,37 @@ ARCHIVE_LOCK = threading.Lock()
 COMPRESSED_TURNS = 0
 
 
+def safe_text(value):
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        value = str(value)
+    try:
+        value.encode("utf-8")
+        return value
+    except UnicodeEncodeError:
+        try:
+            raw = value.encode("utf-8", "surrogateescape")
+        except Exception:
+            return value.encode("utf-8", "replace").decode("utf-8")
+        for encoding in ("utf-8", "gb18030"):
+            try:
+                return raw.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        return raw.decode("utf-8", "replace")
+
+
+def json_sanitize(value):
+    if isinstance(value, str):
+        return safe_text(value)
+    if isinstance(value, dict):
+        return {safe_text(str(key)): json_sanitize(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [json_sanitize(item) for item in value]
+    return value
+
+
 def _encoder():
     try:
         import tiktoken
@@ -117,6 +148,7 @@ ENCODER = _encoder()
 def count_tokens(text):
     if not text:
         return 0
+    text = safe_text(text)
     if ENCODER is not None:
         try:
             return len(ENCODER.encode(text, disallowed_special=()))
@@ -154,36 +186,36 @@ def common_fields():
 
 def content_to_text(content):
     if isinstance(content, str):
-        return content
+        return safe_text(content)
     if isinstance(content, dict):
         text = content.get("text")
         if isinstance(text, str):
-            return text
-        return json.dumps(content, ensure_ascii=False)
+            return safe_text(text)
+        return json.dumps(json_sanitize(content), ensure_ascii=False)
     if isinstance(content, list):
         parts = []
         for block in content:
             if isinstance(block, str):
-                parts.append(block)
+                parts.append(safe_text(block))
             elif isinstance(block, dict):
                 block_type = block.get("type")
                 text = block.get("text")
                 if isinstance(text, str):
-                    parts.append(text)
+                    parts.append(safe_text(text))
                 elif block_type in ("thinking", "redacted_thinking", "signature"):
                     continue
                 else:
-                    parts.append(json.dumps(block, ensure_ascii=False))
+                    parts.append(json.dumps(json_sanitize(block), ensure_ascii=False))
             else:
-                parts.append(str(block))
+                parts.append(safe_text(str(block)))
         return "\n".join(part for part in parts if part)
     if content is None:
         return ""
-    return str(content)
+    return safe_text(str(content))
 
 
 def probe(url, body, timeout=6):
-    data = json.dumps(body).encode("utf-8")
+    data = json.dumps(json_sanitize(body), ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(url, data=data, method="POST")
     request.add_header("Authorization", "Bearer " + API_KEY)
     request.add_header("Content-Type", "application/json")
@@ -257,6 +289,60 @@ def get_llm():
         return LLM
 
 
+def error_status(err):
+    status = getattr(err, "status_code", None)
+    if status is not None:
+        return status
+    response = getattr(err, "response", None)
+    return getattr(response, "status_code", None)
+
+
+def describe_error(err):
+    text = safe_text(str(err)).replace("\n", " ").strip() or type(err).__name__
+    status = error_status(err)
+    if status == 403 or text.lower() == "forbidden":
+        return (
+            "upstream HTTP 403 Forbidden. The gateway rejected this request "
+            "(check model access)."
+        )
+    if status == 401:
+        return "upstream HTTP 401. Injected credentials were rejected."
+    if len(text) > 400:
+        text = text[:400] + "..."
+    return text
+
+
+def flip_protocol():
+    global PROTOCOL, LLM
+    with PROTOCOL_LOCK:
+        PROTOCOL = "anthropic" if PROTOCOL != "anthropic" else "openai"
+    with LLM_LOCK:
+        LLM = None
+
+
+def invoke_chat(messages):
+    bound = get_bound_llm()
+    if bound is None:
+        response = get_llm().invoke(messages)
+        return content_to_text(getattr(response, "content", response)), []
+    return run_tool_loop(messages, bound)
+
+
+def call_with_protocol_retry(messages):
+    try:
+        return invoke_chat(messages)
+    except Exception as err:
+        status = error_status(err)
+        text = safe_text(str(err)).lower()
+        mismatch = status in (404, 405) or "method not allowed" in text
+        if not mismatch:
+            raise RuntimeError(describe_error(err)) from err
+        flip_protocol()
+        try:
+            return invoke_chat(messages)
+        except Exception as err2:
+            raise RuntimeError(describe_error(err2)) from err2
+
 
 def _truncate(text):
     if len(text) <= MAX_OUTPUT:
@@ -284,7 +370,8 @@ def run_command(cmd: str) -> str:
             ["/bin/sh", "-c", cmd],
             cwd=WORKSPACE,
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=SHELL_TIMEOUT,
         )
     except subprocess.TimeoutExpired:
@@ -311,7 +398,7 @@ def write_file(path: str, content: str) -> str:
     try:
         os.makedirs(os.path.dirname(target), exist_ok=True)
         with open(target, "w", encoding="utf-8") as handle:
-            handle.write(content)
+            handle.write(safe_text(content))
     except OSError as exc:
         return "error: %s" % exc
     return "wrote %d chars to %s" % (len(content), os.path.relpath(target, WORKSPACE))
@@ -414,7 +501,8 @@ def install_packages(manager: str, packages: str) -> str:
             ["/bin/sh", "-c", command],
             cwd=WORKSPACE,
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=INSTALL_TIMEOUT,
         )
     except subprocess.TimeoutExpired:
@@ -448,7 +536,8 @@ def install_android_sdk(packages: str = "") -> str:
             ["/bin/sh", "-c", command],
             cwd=WORKSPACE,
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=INSTALL_TIMEOUT,
             env=env,
         )
@@ -498,7 +587,7 @@ def run_tool_loop(messages, bound):
                     output = handler.invoke(args)
                 except Exception as exc:
                     output = "error: %s" % exc
-            output = _truncate(str(output))
+            output = _truncate(safe_text(str(output)))
             transcript.append({"tool": name, "args": args, "output": output[:500]})
             current.append(ToolMessage(content=output, tool_call_id=call.get("id")))
     final = content_to_text(getattr(current[-1], "content", ""))
@@ -645,28 +734,22 @@ def run_chat(message):
             "MonkeyCode LLM was not injected: MCAI_LLM_BASE_URL and "
             "MCAI_LLM_API_KEY are required"
         )
-    message, trimmed = truncate_message(message)
+    message, trimmed = truncate_message(safe_text(message))
     with HISTORY_LOCK:
         compress_history()
 
-        messages = [SystemMessage(content=SYSTEM_PROMPT)]
+        messages = [SystemMessage(content=safe_text(SYSTEM_PROMPT))]
         for turn in HISTORY:
             if turn["role"] == "user":
-                messages.append(HumanMessage(content=turn["content"]))
+                messages.append(HumanMessage(content=safe_text(turn["content"])))
             else:
-                messages.append(AIMessage(content=turn["content"]))
-        messages.append(HumanMessage(content=message))
+                messages.append(AIMessage(content=safe_text(turn["content"])))
+        messages.append(HumanMessage(content=safe_text(message)))
 
-        bound = get_bound_llm()
-        if bound is None:
-            response = get_llm().invoke(messages)
-            reply = content_to_text(getattr(response, "content", response))
-            used = []
-        else:
-            reply, used = run_tool_loop(messages, bound)
+        reply, used = call_with_protocol_retry(messages)
 
-        reply, trimmed_reply = truncate_message(reply)
-        HISTORY.append({"role": "user", "content": message})
+        reply, trimmed_reply = truncate_message(safe_text(reply))
+        HISTORY.append({"role": "user", "content": safe_text(message)})
         HISTORY.append({"role": "assistant", "content": reply})
         dropped = evict_history(MAX_TURNS)
         compress_history()
@@ -690,7 +773,7 @@ class Handler(BaseHTTPRequestHandler):
     def send_json(self, status, payload):
         payload = dict(payload)
         payload.update(common_fields())
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        body = json.dumps(json_sanitize(payload), ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -780,7 +863,7 @@ class Handler(BaseHTTPRequestHandler):
             length = 0
         raw = self.rfile.read(length) if length > 0 else b""
         try:
-            data = json.loads(raw.decode("utf-8"))
+            data = json.loads(raw.decode("utf-8", "replace"))
         except (ValueError, UnicodeDecodeError):
             self.send_json(400, {"ok": False, "error": "invalid json"})
             return
@@ -792,7 +875,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(400, {"ok": False, "error": "message is empty"})
             return
         try:
-            reply, tools_used, memory = run_chat(message)
+            reply, tools_used, memory = run_chat(safe_text(message))
             self.send_json(
                 200,
                 {
