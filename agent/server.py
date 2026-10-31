@@ -10,7 +10,7 @@ import threading
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import urllib.error
 import urllib.request
@@ -1252,6 +1252,38 @@ class Handler(BaseHTTPRequestHandler):
                         "archive": archived,
                     },
                 )
+            elif path == "/files":
+                query = parse_qs(urlparse(self.path).query)
+                rel = (query.get("path") or ["."])[0]
+                read = (query.get("read") or ["0"])[0] in ("1", "true", "yes")
+                try:
+                    target = _workspace_path(rel)
+                except ValueError as exc:
+                    self.send_json(400, {"ok": False, "error": str(exc)})
+                    return
+                if read:
+                    if not os.path.isfile(target):
+                        self.send_json(400, {"ok": False, "error": "not a file"})
+                        return
+                    with open(target, "r", encoding="utf-8", errors="replace") as handle:
+                        content = _truncate(handle.read())
+                    self.send_json(200, {"ok": True, "content": content})
+                else:
+                    if not os.path.isdir(target):
+                        self.send_json(400, {"ok": False, "error": "not a directory"})
+                        return
+                    entries = []
+                    for item in sorted(os.scandir(target), key=lambda e: e.name):
+                        stat = item.stat()
+                        entries.append(
+                            {
+                                "name": item.name,
+                                "dir": item.is_dir(follow_symlinks=False),
+                                "size": stat.st_size,
+                                "mtime": time.strftime("%m-%d %H:%M", time.localtime(stat.st_mtime)),
+                            }
+                        )
+                    self.send_json(200, {"ok": True, "path": rel, "entries": entries})
             else:
                 self.send_json(404, {"ok": False, "error": "not found"})
         except Exception as exc:

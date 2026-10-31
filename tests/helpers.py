@@ -29,6 +29,21 @@ def http_get(port, path):
         return json.loads(resp.read().decode("utf-8"))
 
 
+def http_get_json(port, path):
+    url = "http://127.0.0.1:%d%s" % (port, path)
+    try:
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            return resp.status, body, dict(resp.headers)
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", "replace")
+        try:
+            body = json.loads(raw) if raw else {}
+        except ValueError:
+            body = {"error": raw}
+        return exc.code, body, dict(exc.headers)
+
+
 def http_post(port, path, payload):
     url = "http://127.0.0.1:%d%s" % (port, path)
     data = json.dumps(payload).encode("utf-8")

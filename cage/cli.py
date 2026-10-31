@@ -401,6 +401,75 @@ def _print_status_extras(mode):
     print("work: %s" % usage)
 
 
+def cmd_work(name_arg=None):
+    from cage import workspace
+
+    st = load_state()
+    if name_arg:
+        name = sanitize_name(name_arg)
+        if not name:
+            raise CageError("usage: work [name]")
+        announce_name(name_arg, name)
+    else:
+        name = st.get("current")
+        if not name:
+            raise CageError("no current agent (run: status)")
+    entry = (st.get("agents") or {}).get(name)
+    if entry is None:
+        raise CageError("unknown agent: %s (run: status)" % name)
+    mode = entry.get("mode") or detect_mode()
+    rel = "."
+    handle = {
+        "mode": mode,
+        "root": str(home() / "work" / name),
+        "name": name,
+        "port": entry.get("port"),
+    }
+    print("workspace %s (%s)" % (name, mode))
+    while True:
+        entries = workspace.list_workspace(handle, rel)
+        print(workspace.render_listing(rel, entries) or "(empty)")
+        try:
+            line = safe_text(input("work> ")).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if not line or line in ("q", "quit"):
+            return
+        if line == "p":
+            print("use: publish --repo <url> -m <message>")
+            continue
+        parts = line.split()
+        try:
+            if parts[0] == "r" and len(parts) >= 2:
+                idx = workspace.parse_selection(parts[1], len(entries))
+                item = entries[idx - 1]
+                path = item["name"] if rel in (".", "") else os.path.join(rel, item["name"])
+                print(workspace.read_workspace(handle, path))
+                continue
+            if parts[0] == "x" and len(parts) >= 3:
+                idx = workspace.parse_selection(parts[1], len(entries))
+                item = entries[idx - 1]
+                dest = parts[2]
+                if not workspace.host_dest_allowed(dest, os.getcwd()):
+                    raise CageError("destination outside cwd")
+                path = item["name"] if rel in (".", "") else os.path.join(rel, item["name"])
+                print("extracted %s" % workspace.extract(handle, path, dest))
+                continue
+            idx = workspace.parse_selection(line, len(entries))
+        except CageError as exc:
+            print("error: %s" % exc)
+            continue
+        if not entries:
+            continue
+        item = entries[idx - 1]
+        path = item["name"] if rel in (".", "") else os.path.join(rel, item["name"])
+        if item.get("dir"):
+            rel = path
+        else:
+            print(workspace.read_workspace(handle, path))
+
+
 def cmd_stop(name_arg=None):
     with state_lock():
         st = load_state()
@@ -785,6 +854,7 @@ HELP_TEXT = """cage 命令:
   stop [name]   停止并移除 agent
   profiles      列出能力档位
   serve         启动宿主 HTTP 接口
+  work [name]   浏览当前 agent 工作区
   help          显示本帮助
   quit/exit     离开 cage
 
@@ -923,6 +993,9 @@ def dispatch(command, args):
     if command == "serve":
         code = cmd_serve(args)
         return "ok" if code == 0 else "fail"
+    if command == "work":
+        cmd_work(args[0] if args else None)
+        return "continue"
     if command == "help":
         sys.stdout.write(HELP_TEXT)
         return "ok"
