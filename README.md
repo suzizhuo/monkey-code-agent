@@ -2,6 +2,8 @@
 
 隔离的 LangChain agent：宿主机 TUI 负责生命周期，容器（或无 Docker 时的进程）跑 `agent/server.py`。平台通过 `MCAI_LLM_*` 注入网关；本仓库不内置厂商或模型名。
 
+分阶段实现提示词在 `prompts/`（先读 `prompts/README.md`）。权威规格：`specs/2026-10-31-cage-design.md`、`plans/2026-10-31-cage.md`。
+
 ## 三分钟上手
 
 ```bash
