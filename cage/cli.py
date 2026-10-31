@@ -351,6 +351,7 @@ def cmd_status():
         print("no agents (run: init)")
         print(isolation_summary(profile_from_env()))
         print("mode: %s" % mode)
+        _print_status_extras(mode)
         return
     for name in sorted(agents):
         entry = agents[name]
@@ -379,6 +380,25 @@ def cmd_status():
     if source:
         print("agent source: %s" % source)
     print("mode: %s" % mode)
+    _print_status_extras(mode)
+
+
+def _print_status_extras(mode):
+    print("watchdog: %ss" % (os.environ.get("CAGE_WATCHDOG_SECS", "0") or "0"))
+    work_dir = home() / "work"
+    usage = str(work_dir)
+    try:
+        proc = subprocess.run(
+            ["du", "-sh", str(work_dir)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            usage = proc.stdout.strip()
+    except Exception:
+        pass
+    print("work: %s" % usage)
 
 
 def cmd_stop(name_arg=None):

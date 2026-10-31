@@ -276,14 +276,14 @@ def docker_run_args(name, port, profile, env, cfg):
     return args
 
 
-def process_spawn_args(name, port, profile, env, cfg):
+def process_spawn_args(name, port, profile, env, cfg, process_install=False):
     root = home()
     merged = dict(os.environ)
     if env:
         merged.update(env)
     merged["CAGE_BIND"] = "127.0.0.1"
     merged["CAGE_PORT"] = str(port)
-    merged.update(_cage_runtime_env(name, profile, env, cfg))
+    merged.update(_cage_runtime_env(name, profile, env, cfg, process_install=process_install))
     server = str(AGENT_DIR / "server.py")
     merged["CAGE_AGENT_SERVER"] = server
     launcher = (
@@ -306,6 +306,17 @@ def process_spawn_args(name, port, profile, env, cfg):
         "env": merged,
         "detached": True,
     }
+
+
+def log_source(handle):
+    path = None
+    if isinstance(handle, dict):
+        path = handle.get("logpath") or handle.get("path")
+    elif handle:
+        path = str(handle)
+    if path and os.path.isfile(path):
+        return open(path, "r", encoding="utf-8", errors="replace")
+    return iter(())
 
 
 class DockerRuntime:
@@ -384,7 +395,9 @@ class ProcessRuntime:
 
     def start(self, name, port, profile, env):
         cfg = PROFILES.get(profile) or PROFILES[DEFAULT_PROFILE]
-        spec = process_spawn_args(name, port, profile, env, cfg)
+        raw = os.environ.get("CAGE_PROCESS_INSTALL", "").strip().lower()
+        process_install = raw in ("1", "true", "yes", "on")
+        spec = process_spawn_args(name, port, profile, env, cfg, process_install=process_install)
         Path(spec["cwd"]).mkdir(parents=True, exist_ok=True)
         log_path = Path(spec["logpath"])
         log_path.parent.mkdir(parents=True, exist_ok=True)
