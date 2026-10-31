@@ -794,7 +794,23 @@ def apply_model_override(opts):
 
 
 def cmd_serve(args):
-    raise CageError("serve is not implemented yet")
+    from cage import httpapi
+
+    port = SERVE_PORT
+    env_port = os.environ.get("CAGE_SERVE_PORT", "").strip()
+    if args:
+        try:
+            port = int(args[0])
+        except ValueError:
+            raise CageError("usage: serve [port]")
+    elif env_port:
+        try:
+            port = int(env_port)
+        except ValueError:
+            raise CageError("CAGE_SERVE_PORT must be an integer")
+    static_dir = os.environ.get("CAGE_STATIC_DIR", "").strip() or "off"
+    print("serving on 127.0.0.1:%d (CORS on, static %s)" % (port, static_dir))
+    return httpapi.serve(port)
 
 
 def dispatch(command, args):
