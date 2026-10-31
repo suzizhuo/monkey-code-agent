@@ -437,7 +437,10 @@ def cmd_work(name_arg=None):
         if not line or line in ("q", "quit"):
             return
         if line == "p":
-            print("use: publish --repo <url> -m <message>")
+            try:
+                cmd_publish([])
+            except CageError as exc:
+                print("error: %s" % exc)
             continue
         parts = line.split()
         try:
@@ -468,6 +471,67 @@ def cmd_work(name_arg=None):
             rel = path
         else:
             print(workspace.read_workspace(handle, path))
+
+
+def cmd_key(name_arg=None):
+    from cage import publish as pub
+    from cage.runtime import run_docker
+
+    st = load_state()
+    if name_arg:
+        name = sanitize_name(name_arg)
+        if not name:
+            raise CageError("usage: key [name]")
+        announce_name(name_arg, name)
+    else:
+        name = st.get("current") or "default"
+    entry = (st.get("agents") or {}).get(name) or {}
+    mode = entry.get("mode") or detect_mode()
+    if mode == "docker":
+        proc = run_docker(
+            ["exec", "cage-" + name, "cat", "/work/.cage/ssh/id_ed25519.pub"],
+            timeout=20,
+            check=False,
+        )
+        text = (proc.stdout or "").strip()
+        if proc.returncode == 0 and text:
+            print(text)
+            return
+    keydir = str(home() / "ssh" / name)
+    _priv, pub_path = pub.ensure_ssh_key(keydir)
+    print(open(pub_path, encoding="utf-8").read().strip())
+
+
+def cmd_publish(args):
+    from cage import publish as pub
+
+    opts, _positional = parse_options(args or [])
+    repo = (opts.get("repo") or os.environ.get("CAGE_PUBLISH_REPO", "")).strip()
+    message = opts.get("message") or "update"
+    branch = opts.get("branch") or "main"
+    st = load_state()
+    name = st.get("current")
+    if not name:
+        raise CageError("no current agent (run: status)")
+    workdir = str(home() / "work" / name)
+    token = os.environ.get("CAGE_GH_TOKEN", "").strip()
+    if token:
+        auth = "pat:" + token
+        env = {}
+    else:
+        priv, _pub = pub.ensure_ssh_key(str(home() / "ssh" / name))
+        auth = "ssh:" + priv
+        env = pub.git_env(auth)
+    env = dict(env)
+    env["CAGE_WORKDIR"] = workdir
+    plan = pub.publish_plan(workdir, repo, message, branch, auth)
+    result = pub.run_publish(plan, env)
+    if not result.get("ok"):
+        raise CageError("publish failed: %s" % (result.get("error_kind") or "remote"))
+    print(
+        "published sha=%s repo=%s branch=%s files=%s"
+        % (result.get("sha"), repo, branch, result.get("files"))
+    )
 
 
 def cmd_stop(name_arg=None):
@@ -855,6 +919,8 @@ HELP_TEXT = """cage 命令:
   profiles      列出能力档位
   serve         启动宿主 HTTP 接口
   work [name]   浏览当前 agent 工作区
+  key [name]    打印工作区 SSH 公钥
+  publish       把工作区推到 GitHub
   help          显示本帮助
   quit/exit     离开 cage
 
@@ -863,6 +929,9 @@ options (init, setup, rebuild):
   --source <local|git-url>  agent source (default local)
   --model <name>            override the injected model
   --venv                    create ~/.cage/venv and install agent deps (setup)
+  --repo <url>              git remote for publish
+  -m <message>              commit message for publish
+  --branch <name>           publish branch (default main)
 
 environment:
   CAGE_PROFILE, CAGE_AGENT_SOURCE, CAGE_MODEL, CAGE_DEFAULT_MODEL
@@ -995,6 +1064,12 @@ def dispatch(command, args):
         return "ok" if code == 0 else "fail"
     if command == "work":
         cmd_work(args[0] if args else None)
+        return "continue"
+    if command == "key":
+        cmd_key(args[0] if args else None)
+        return "continue"
+    if command == "publish":
+        cmd_publish(args)
         return "continue"
     if command == "help":
         sys.stdout.write(HELP_TEXT)

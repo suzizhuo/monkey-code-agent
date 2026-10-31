@@ -68,6 +68,8 @@ def audit_record(ts, agent, tool, args, output_len, status, duration_ms):
     for key, value in (args or {}).items():
         if is_sensitive_arg(str(key)):
             digested[key] = _digest_value(value)
+        elif str(key) == "repo":
+            digested[key] = str(value).replace("git@github.com:", "github.com/")
         else:
             digested[key] = value
     return {

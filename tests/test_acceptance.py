@@ -21,6 +21,8 @@ def test_help_lists_core_commands(capsys):
         "help",
     ]:
         assert name in out
+    for name in ["work", "key", "publish"]:
+        assert name in out
 
 
 def test_profiles_two_tiers(capsys):
@@ -43,3 +45,5 @@ def test_readme_covers_required_sections():
         "CAGE_WATCHDOG_SECS",
     ]:
         assert needle in text
+    assert "工作区在哪" in text or "work" in text
+    assert "GitHub" in text

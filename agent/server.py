@@ -808,6 +808,41 @@ def solve_challenge(url: str, kind: str = "captcha") -> str:
     return "solved=%s|escalated=%s|kind=%s|url=%s" % (text, str(escalated).lower(), kind or "captcha", url or "")
 
 
+def run_publish(plan, env):
+    from cage.publish import run_publish as _run
+
+    return _run(plan, env)
+
+
+@tool
+def git_publish(repo: str, message: str, branch: str = "main") -> str:
+    """Commit the workspace and push to the given git remote."""
+    from cage.publish import ensure_ssh_key, git_env, publish_plan
+
+    repo = (repo or os.environ.get("CAGE_PUBLISH_REPO", "")).strip()
+    token = os.environ.get("CAGE_GH_TOKEN", "").strip()
+    if token:
+        auth = "pat:" + token
+        env = {}
+    else:
+        try:
+            priv, _pub = ensure_ssh_key(os.path.join(WORKSPACE, ".cage", "ssh"))
+        except Exception:
+            priv = os.path.join(WORKSPACE, ".cage", "ssh", "id_ed25519")
+        auth = "ssh:" + priv
+        env = git_env(auth)
+    env = dict(env)
+    env["CAGE_WORKDIR"] = WORKSPACE
+    try:
+        plan = publish_plan(WORKSPACE, repo, message, branch or "main", auth)
+        result = run_publish(plan, env)
+    except Exception as exc:
+        return "error: %s" % exc
+    if result.get("ok"):
+        return "published sha=%s files=%s" % (result.get("sha"), result.get("files"))
+    return "error: %s" % (result.get("error_kind") or "remote")
+
+
 @tool
 def delegate(task: str, tools=None, max_steps: int = 8, budget_tokens: int = 200000) -> str:
     """Hand a task to an isolated worker and return its clamped summary."""
@@ -846,7 +881,10 @@ def select_tools(mode=None):
             for part in os.environ.get("CAGE_WORKER_TOOLS", "").split(",")
             if part.strip()
         ]
-        mapping = {item.name: item for item in BASELINE_TOOLS + [challenge_probe, solve_challenge]}
+        mapping = {
+            item.name: item
+            for item in BASELINE_TOOLS + [challenge_probe, solve_challenge, git_publish]
+        }
         if not requested:
             requested = [item.name for item in BASELINE_TOOLS]
         return [mapping[name] for name in requested if name != "delegate" and name in mapping]
