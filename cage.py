@@ -17,9 +17,10 @@ def configure_stdio():
 
 def main(argv=None):
     configure_stdio()
-    # cage.cli is added in a later task; keep this entry import-free until then.
-    raise SystemExit("cage: cli not implemented")
+    from cage.cli import main as cli_main
+
+    return cli_main(sys.argv if argv is None else argv)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
