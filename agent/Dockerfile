@@ -9,11 +9,7 @@ ENV PYTHONUNBUFFERED=1 \
     LC_ALL=C.UTF-8 \
     PYTHONIOENCODING=utf-8 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
-    ISOLIS_WORKSPACE=/work \
-    ANDROID_HOME=/opt/android-sdk \
-    ANDROID_SDK_ROOT=/opt/android-sdk \
-    JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64 \
-    GRADLE_USER_HOME=/work/.gradle \
+    CAGE_WORKSPACE=/work \
     NPM_CONFIG_CACHE=/work/.npm \
     PIP_CACHE_DIR=/work/.pip-cache \
     DEBIAN_FRONTEND=noninteractive
@@ -46,7 +42,6 @@ RUN apt-get update \
         cmake \
         nodejs \
         npm \
-        openjdk-17-jdk-headless \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -58,14 +53,9 @@ RUN python -m playwright install --with-deps chromium \
     && rm -rf /var/lib/apt/lists/* \
     && chmod -R a+rX /ms-playwright
 
-COPY install-android-sdk.sh /usr/local/bin/install-android-sdk
-RUN chmod 0755 /usr/local/bin/install-android-sdk \
-    && mkdir -p /opt/android-sdk \
-    && chmod 0777 /opt/android-sdk
-
 RUN git config --system --add safe.directory /work \
-    && git config --system user.name "Isolis Agent" \
-    && git config --system user.email "agent@isolis.local"
+    && git config --system user.name "Cage Agent" \
+    && git config --system user.email "agent@cage.local"
 
 COPY server.py /app/server.py
 

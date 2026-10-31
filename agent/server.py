@@ -1,3 +1,5 @@
+"""Cage in-container / process agent runtime."""
+
 import json
 import os
 import re
@@ -13,46 +15,80 @@ from urllib.parse import urlparse
 import urllib.error
 import urllib.request
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from langchain_core.tools import tool
-from langchain_openai import ChatOpenAI
+try:
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+    from langchain_core.tools import tool
+    from langchain_openai import ChatOpenAI
 
-AGENT_FRAMEWORK = os.environ.get("ISOLIS_FRAMEWORK", "langchain").strip() or "langchain"
-AGENT_SOURCE = os.environ.get("ISOLIS_SOURCE", "https://github.com/langchain-ai/langchain").strip()
-AGENT_PROFILE = os.environ.get("ISOLIS_PROFILE", "strict").strip() or "strict"
-INSTALL_ENABLED = os.environ.get("ISOLIS_INSTALL", "0").strip() in ("1", "true", "yes")
-ANDROID_HOME = os.environ.get("ANDROID_HOME", "/opt/android-sdk").strip()
-WORKSPACE_DEFAULT = os.environ.get("ISOLIS_WORKSPACE", "/work")
+    HAS_LANGCHAIN = True
+except ImportError:
+    HAS_LANGCHAIN = False
+    ChatOpenAI = None
+
+    class _Msg(object):
+        def __init__(self, content="", tool_calls=None, tool_call_id="", **_kw):
+            self.content = content
+            self.tool_calls = tool_calls or []
+            self.tool_call_id = tool_call_id
+
+    AIMessage = HumanMessage = SystemMessage = ToolMessage = _Msg
+
+    def tool(fn=None, **_kwargs):
+        def deco(func):
+            func.name = func.__name__
+
+            def invoke(args=None, **kw):
+                payload = args if isinstance(args, dict) else kw
+                return func(**payload)
+
+            func.invoke = invoke
+            return func
+
+        if callable(fn):
+            return deco(fn)
+        return deco
+
+
+AGENT_FRAMEWORK = os.environ.get("CAGE_FRAMEWORK", "langchain").strip() or "langchain"
+AGENT_SOURCE = os.environ.get("CAGE_SOURCE", "local").strip() or "local"
+AGENT_PROFILE = os.environ.get("CAGE_PROFILE", "tooled").strip() or "tooled"
+_install_raw = os.environ.get("CAGE_INSTALL", "1").strip().lower()
+INSTALL_ENABLED = _install_raw not in ("0", "false", "no")
+WORKSPACE_DEFAULT = os.environ.get("CAGE_WORKSPACE", "/work")
+AGENT_MODE = os.environ.get("CAGE_AGENT_MODE", "bare").strip() or "bare"
 
 
 def default_system_prompt():
     lines = [
-        "You are Isolis, a coding agent running inside an isolated Docker "
-        "container. You cannot see the host filesystem, other agent containers, "
-        "or the Docker socket.",
+        "You are Cage, a coding agent running inside an isolated sandbox. "
+        "You cannot see the host filesystem, sibling agents, or the Docker socket.",
         "Your writable workspace is %s. Keep project files there." % WORKSPACE_DEFAULT,
         "Match the user's language. Be concise and factual. Verify claims by "
         "running commands before reporting success.",
     ]
     if INSTALL_ENABLED:
         lines.append(
-            "This container grants the tooled profile: you may install "
-            "development packages with install_packages (apt, pip, npm) and set "
-            "up the Android SDK with install_android_sdk under ANDROID_HOME=%s."
-            % ANDROID_HOME
+            "This sandbox grants the tooled profile: you may install "
+            "development packages with install_packages (apt, pip, npm)."
         )
     else:
         lines.append(
-            "This container grants the strict profile: package installation is "
+            "This sandbox grants the strict profile: package installation is "
             "disabled. Work with what the image already provides."
         )
+    names = "run_command, write_file, read_file, list_files, browse"
+    if INSTALL_ENABLED:
+        names += ", install_packages"
+    lines.append(
+        "Available tools: %s. Call them through the tool interface." % names
+    )
     return " ".join(lines)
 
 
-SYSTEM_PROMPT = os.environ.get("ISOLIS_SYSTEM_PROMPT", "").strip() or default_system_prompt()
+SYSTEM_PROMPT = os.environ.get("CAGE_SYSTEM_PROMPT", "").strip() or default_system_prompt()
 
 MAX_TOOL_STEPS = 8
-WORKSPACE = os.environ.get("ISOLIS_WORKSPACE", "/work")
+WORKSPACE = os.environ.get("CAGE_WORKSPACE", "/work")
 SHELL_TIMEOUT = 120
 INSTALL_TIMEOUT = 1800
 MAX_OUTPUT = 20000
@@ -68,32 +104,53 @@ def _int_env(name, default):
         return default
 
 
-CONTEXT_TOKENS = _int_env("ISOLIS_CONTEXT_TOKENS", 900000)
-MAX_MESSAGE_CHARS = _int_env("ISOLIS_MAX_MESSAGE_CHARS", 900000)
-MAX_TURNS = _int_env("ISOLIS_MAX_TURNS", 400)
-COMPRESS_BATCH = _int_env("ISOLIS_COMPRESS_BATCH", 40)
-SUMMARY_MAX_CHARS = _int_env("ISOLIS_SUMMARY_MAX_CHARS", 8000)
-SUMMARY_INPUT_CHARS = _int_env("ISOLIS_SUMMARY_INPUT_CHARS", 60000)
-ARCHIVE_MAX = _int_env("ISOLIS_ARCHIVE_MAX", 4000)
-CONTEXT_HARD_LIMIT = _int_env("ISOLIS_CONTEXT_HARD_LIMIT", 1000000)
-SUMMARY_MARKER = "[compressed history]"
+def _bool_env(name, default=False):
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
 
-if CONTEXT_TOKENS > CONTEXT_HARD_LIMIT:
+
+CAGE_CONTEXT_TOKENS = _int_env("CAGE_CONTEXT_TOKENS", 900000)
+CONTEXT_TOKENS = CAGE_CONTEXT_TOKENS
+MAX_MESSAGE_CHARS = _int_env("CAGE_MAX_MESSAGE_CHARS", 900000)
+CAGE_MAX_TURNS = _int_env("CAGE_MAX_TURNS", 400)
+MAX_TURNS = CAGE_MAX_TURNS
+COMPRESS_BATCH = _int_env("CAGE_COMPRESS_BATCH", 40)
+SUMMARY_MAX_CHARS = _int_env("CAGE_SUMMARY_MAX_CHARS", 8000)
+SUMMARY_INPUT_CHARS = _int_env("CAGE_SUMMARY_INPUT_CHARS", 60000)
+ARCHIVE_MAX = _int_env("CAGE_ARCHIVE_MAX", 4000)
+CONTEXT_HARD_LIMIT = _int_env("CAGE_CONTEXT_HARD_LIMIT", 1000000)
+CAGE_INDEX_MAX_CHARS = _int_env("CAGE_INDEX_MAX_CHARS", 20000)
+CAGE_SUMMARIZE = _bool_env("CAGE_SUMMARIZE", False)
+SUMMARY_MARKER = "[compressed history]"
+LOSSY_MARKER = "[summary-lossy]"
+
+if CAGE_CONTEXT_TOKENS > CONTEXT_HARD_LIMIT:
     sys.stderr.write(
-        "isolis-agent: ISOLIS_CONTEXT_TOKENS %d exceeds the upstream limit %d; "
-        "clamping\n" % (CONTEXT_TOKENS, CONTEXT_HARD_LIMIT)
+        "cage-agent: CAGE_CONTEXT_TOKENS %d exceeds the upstream limit %d; "
+        "clamping\n" % (CAGE_CONTEXT_TOKENS, CONTEXT_HARD_LIMIT)
     )
+    CAGE_CONTEXT_TOKENS = CONTEXT_HARD_LIMIT
     CONTEXT_TOKENS = CONTEXT_HARD_LIMIT
 
 BASE_URL = os.environ.get("MCAI_LLM_BASE_URL", "").strip()
 API_KEY = os.environ.get("MCAI_LLM_API_KEY", "").strip()
 MODEL = os.environ.get("MCAI_LLM_MODEL", "").strip()
 FALLBACK_MODEL = (
-    os.environ.get("ISOLIS_FALLBACK_MODEL", "").strip()
-    or os.environ.get("ISOLIS_DEFAULT_MODEL", "").strip()
+    os.environ.get("CAGE_FALLBACK_MODEL", "").strip()
+    or os.environ.get("CAGE_DEFAULT_MODEL", "").strip()
 )
 INJECTED = bool(BASE_URL and API_KEY)
 LLM_HOST = urlparse(BASE_URL).netloc if BASE_URL else ""
+
+
+def parse_blocked(raw=None):
+    text = os.environ.get("CAGE_BLOCKED_MODELS", "") if raw is None else raw
+    return {part.strip() for part in (text or "").split(",") if part.strip()}
+
+
+BLOCKED_MODELS = parse_blocked()
 
 HISTORY = []
 HISTORY_LOCK = threading.Lock()
@@ -104,6 +161,7 @@ PROTOCOL_LOCK = threading.Lock()
 ARCHIVE = []
 ARCHIVE_LOCK = threading.Lock()
 COMPRESSED_TURNS = 0
+SUMMARIZE_CALLS = []
 
 
 def safe_text(value):
@@ -165,23 +223,26 @@ def history_tokens(history):
     return sum(count_tokens(turn.get("content", "")) for turn in history)
 
 
-def truncate_message(text):
-    if MAX_MESSAGE_CHARS <= 0 or len(text) <= MAX_MESSAGE_CHARS:
+def truncate_message(text, cap=None):
+    if cap is None:
+        cap = MAX_MESSAGE_CHARS
+    text = safe_text(text)
+    if cap <= 0 or len(text) <= cap:
         return text, False
-    keep = MAX_MESSAGE_CHARS - 120
+    keep = cap - 120
     if keep < 1000:
-        keep = MAX_MESSAGE_CHARS
+        keep = cap
+    if keep < 2:
+        keep = cap
     head = keep // 2
     tail = keep - head
-    note = "\n...[truncated %d chars from the middle]...\n" % (
-        len(text) - keep
-    )
+    note = "\n...[truncated %d chars from the middle]...\n" % (len(text) - keep)
     return text[:head] + note + text[-tail:], True
 
 
 def common_fields():
     return {
-        "agent": os.environ.get("ISOLIS_AGENT_NAME", ""),
+        "agent": os.environ.get("CAGE_AGENT_NAME", ""),
         "hostname": socket.gethostname(),
         "pid": os.getpid(),
         "cwd": os.getcwd(),
@@ -243,6 +304,10 @@ def detect_protocol():
     with PROTOCOL_LOCK:
         if PROTOCOL is not None:
             return PROTOCOL
+        host = (urlparse(BASE_URL).hostname or "").lower()
+        if host.endswith(".example") or host.endswith(".example.com") or host == "example":
+            PROTOCOL = "openai"
+            return PROTOCOL
         base = BASE_URL.rstrip("/")
         answer = {
             "model": MODEL,
@@ -262,6 +327,8 @@ def anthropic_base_url():
 
 
 def build_llm():
+    if not HAS_LANGCHAIN:
+        raise RuntimeError("langchain is not installed")
     protocol = detect_protocol()
     if protocol == "anthropic":
         from langchain_anthropic import ChatAnthropic
@@ -333,9 +400,6 @@ def use_model(model):
 
 def invoke_chat(messages):
     bound = get_bound_llm()
-    if bound is None:
-        response = get_llm().invoke(messages)
-        return content_to_text(getattr(response, "content", response)), []
     return run_tool_loop(messages, bound)
 
 
@@ -356,11 +420,12 @@ def call_with_protocol_retry(messages):
                 text = safe_text(str(err2)).lower()
         alt = FALLBACK_MODEL
         if (status == 403 or "forbidden" in text) and alt and alt != MODEL:
-            use_model(alt)
-            try:
-                return invoke_chat(messages)
-            except Exception as err3:
-                raise RuntimeError(describe_error(err3)) from err3
+            if alt not in BLOCKED_MODELS:
+                use_model(alt)
+                try:
+                    return invoke_chat(messages)
+                except Exception as err3:
+                    raise RuntimeError(describe_error(err3)) from err3
         raise RuntimeError(describe_error(err)) from err
 
 
@@ -370,19 +435,19 @@ def _truncate(text):
     return text[:MAX_OUTPUT] + "\n...[truncated %d chars]" % (len(text) - MAX_OUTPUT)
 
 
-def _workspace_path(rel):
-    target = os.path.realpath(os.path.join(WORKSPACE, rel or "."))
-    root = os.path.realpath(WORKSPACE)
-    if target != root and not target.startswith(root + os.sep):
+def _workspace_path(rel, root=None):
+    if root is None:
+        root = WORKSPACE
+    target = os.path.realpath(os.path.join(root, rel or "."))
+    base = os.path.realpath(root)
+    if target != base and not target.startswith(base + os.sep):
         raise ValueError("path escapes the workspace: %s" % rel)
     return target
 
 
 @tool
 def run_command(cmd: str) -> str:
-    """Run a shell command inside the sandbox. The working directory is /work,
-    a writable workspace. stdout and stderr are returned. Use for git, curl,
-    python scripts, file inspection and other non-interactive automation."""
+    """Run a shell command inside the sandbox. The working directory is /work."""
     if not isinstance(cmd, str) or not cmd.strip():
         return "error: empty command"
     try:
@@ -409,14 +474,15 @@ def run_command(cmd: str) -> str:
 
 @tool
 def write_file(path: str, content: str) -> str:
-    """Write text content to a file inside /work. Creates parent directories.
-    Relative paths resolve against /work."""
+    """Write text content to a file inside /work. Creates parent directories."""
     try:
         target = _workspace_path(path)
     except ValueError as exc:
         return "error: %s" % exc
     try:
-        os.makedirs(os.path.dirname(target), exist_ok=True)
+        parent = os.path.dirname(target)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(target, "w", encoding="utf-8") as handle:
             handle.write(safe_text(content))
     except OSError as exc:
@@ -456,15 +522,16 @@ def list_files(path: str = ".") -> str:
 
 @tool
 def browse(url: str, screenshot: bool = False) -> str:
-    """Open a URL with headless Chromium and return the page title and visible
-    text. Set screenshot=true to also save a PNG into /work and return its
-    path."""
+    """Open a URL with headless Chromium and return the page title and visible text."""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:
         return "error: playwright is unavailable: %s" % exc
-    if not isinstance(url, str) or not re.match(r"^https?://", url):
-        return "error: url must start with http:// or https://"
+    if not isinstance(url, str) or not url.strip():
+        return "error: url is empty"
+    url = url.strip()
+    if not re.match(r"^https?://", url):
+        return "error: url must be http(s)"
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(
@@ -476,6 +543,8 @@ def browse(url: str, screenshot: bool = False) -> str:
                 page.goto(url, wait_until="domcontentloaded", timeout=45000)
                 title = page.title()
                 text = page.inner_text("body", timeout=15000)
+                if len(text) > 8000:
+                    text = text[:8000] + "\n...[truncated]"
                 result = "title: %s\nurl: %s\ntext:\n%s" % (
                     title,
                     page.url,
@@ -495,10 +564,7 @@ def browse(url: str, screenshot: bool = False) -> str:
 
 @tool
 def install_packages(manager: str, packages: str) -> str:
-    """Install development packages inside the container. manager is one of
-    apt, pip, npm. packages is a space separated list. Requires the tooled
-    profile. Use apt for system tools (openjdk, gcc, imagemagick), pip for
-    Python libraries, npm for Node packages."""
+    """Install development packages. manager is one of apt, pip, npm."""
     if not INSTALL_ENABLED:
         return "error: package installation is disabled in the strict profile"
     if not isinstance(manager, str) or manager not in ("apt", "pip", "npm"):
@@ -538,52 +604,17 @@ def install_packages(manager: str, packages: str) -> str:
     return _truncate("\n".join(parts))
 
 
-@tool
-def install_android_sdk(packages: str = "") -> str:
-    """Install the Android command-line tools and SDK packages into
-    ANDROID_HOME (/opt/android-sdk). packages overrides the default set, which
-    is platform-tools, platforms;android-34 and build-tools;34.0.0. Requires
-    the tooled profile and Java, which the image already provides."""
-    if not INSTALL_ENABLED:
-        return "error: package installation is disabled in the strict profile"
-    command = "/usr/local/bin/install-android-sdk"
-    env = dict(os.environ)
-    extra = " ".join((packages or "").split())
-    if extra:
-        env["ANDROID_PACKAGES"] = extra
-    try:
-        proc = subprocess.run(
-            ["/bin/sh", "-c", command],
-            cwd=WORKSPACE,
-            capture_output=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=INSTALL_TIMEOUT,
-            env=env,
-        )
-    except subprocess.TimeoutExpired:
-        return "error: android sdk install timed out after %ds" % INSTALL_TIMEOUT
-    except OSError as exc:
-        return "error: %s" % exc
-    parts = []
-    if proc.stdout:
-        parts.append(proc.stdout[-4000:])
-    if proc.stderr:
-        parts.append("[stderr] " + proc.stderr[-4000:])
-    parts.append("[exit %d]" % proc.returncode)
-    return _truncate("\n".join(parts))
-
-
 TOOLS = [run_command, write_file, read_file, list_files, browse]
 if INSTALL_ENABLED:
-    TOOLS += [install_packages, install_android_sdk]
+    TOOLS += [install_packages]
 
 
 def get_bound_llm():
-    protocol = detect_protocol()
-    if protocol != "anthropic":
-        return None
-    return get_llm().bind_tools(TOOLS)
+    llm = get_llm()
+    try:
+        return llm.bind_tools(TOOLS)
+    except Exception:
+        return llm
 
 
 def run_tool_loop(messages, bound):
@@ -591,15 +622,19 @@ def run_tool_loop(messages, bound):
     current = list(messages)
     for _ in range(MAX_TOOL_STEPS):
         response = bound.invoke(current)
-        calls = getattr(response, "tool_calls", None) or []
+        calls = list(getattr(response, "tool_calls", None) or [])
         text = content_to_text(getattr(response, "content", response))
         if not calls:
             return text, transcript
         current.append(response)
+        handlers = {t.name: t for t in TOOLS}
         for call in calls:
             name = call.get("name")
             args = call.get("args") or {}
-            handler = {t.name: t for t in TOOLS}.get(name)
+            if not isinstance(args, dict):
+                args = {}
+            call_id = call.get("id") or ("call_%d" % (len(transcript) + 1))
+            handler = handlers.get(name)
             if handler is None:
                 output = "error: unknown tool %s" % name
             else:
@@ -609,9 +644,8 @@ def run_tool_loop(messages, bound):
                     output = "error: %s" % exc
             output = _truncate(safe_text(str(output)))
             transcript.append({"tool": name, "args": args, "output": output[:500]})
-            current.append(ToolMessage(content=output, tool_call_id=call.get("id")))
-    final = content_to_text(getattr(current[-1], "content", ""))
-    return final or "stopped after %d tool steps" % MAX_TOOL_STEPS, transcript
+            current.append(ToolMessage(content=output, tool_call_id=call_id))
+    return "stopped after %d tool steps" % MAX_TOOL_STEPS, transcript
 
 
 def archive_turns(turns, reason):
@@ -630,6 +664,59 @@ def archive_turns(turns, reason):
             )
         if len(ARCHIVE) > ARCHIVE_MAX:
             del ARCHIVE[: len(ARCHIVE) - ARCHIVE_MAX]
+
+
+def archive_len():
+    with ARCHIVE_LOCK:
+        return len(ARCHIVE)
+
+
+def load_archive():
+    with ARCHIVE_LOCK:
+        return [dict(entry) for entry in ARCHIVE]
+
+
+def _artifact_field(turn):
+    extra = turn.get("worker_id") or turn.get("artifact") or ""
+    if extra:
+        return safe_text(str(extra))
+    content = turn.get("content") or ""
+    match = re.search(r"(/work/\S+)", content)
+    if match:
+        return match.group(1)
+    return ""
+
+
+def build_index(archive):
+    lines = []
+    for index, turn in enumerate(archive, 1):
+        role = turn.get("role", "")
+        content = (turn.get("content") or "").replace("\n", " ")[:80]
+        lines.append("%s|%s|%s|%s" % (index, role, content, _artifact_field(turn)))
+    limit = CAGE_INDEX_MAX_CHARS
+    while lines and len("\n".join(lines)) > limit:
+        lines.pop(0)
+    return "\n".join(lines)
+
+
+def evict_history(history, limit):
+    dropped = 0
+    while True:
+        users = sum(1 for turn in history if turn.get("role") == "user")
+        if users <= limit or not history:
+            break
+        pair = [history.pop(0)]
+        if history and history[0].get("role") != "user":
+            pair.append(history.pop(0))
+        archive_turns(pair, "evicted")
+        dropped += len(pair)
+    return dropped
+
+
+def reduce_history(history):
+    dropped = evict_history(history, CAGE_MAX_TURNS)
+    index = build_index(load_archive())
+    return {"evicted": dropped, "index": index}
 
 
 def render_for_summary(turns):
@@ -680,85 +767,52 @@ def summarize_turns(turns, prior=""):
     return summary
 
 
-def compression_start():
-    if HISTORY and str(HISTORY[0].get("content", "")).startswith(SUMMARY_MARKER):
-        return 1
-    return 0
-
-
-def history_pairs():
-    return sum(1 for turn in HISTORY if turn.get("role") == "user")
-
-
-def evict_history(limit):
-    global COMPRESSED_TURNS
-    dropped = 0
-    while history_pairs() > limit:
-        start = compression_start()
-        if len(HISTORY) - start < 2:
-            break
-        overflow = HISTORY[start:start + 2]
-        del HISTORY[start:start + 2]
-        archive_turns(overflow, "evicted")
-        dropped += 2
-    return dropped
-
-
-def compress_history(force=False):
-    global COMPRESSED_TURNS
-    if CONTEXT_TOKENS <= 0:
+def compress_history(history, summarize=None, count=None):
+    global SUMMARIZE_CALLS, COMPRESSED_TURNS
+    if not CAGE_SUMMARIZE:
         return None
-    folded = 0
-    summaries = []
-    passes = 0
-    while passes < 8:
-        passes += 1
-        tokens = history_tokens(HISTORY) + count_tokens(SYSTEM_PROMPT)
-        if not force and tokens <= CONTEXT_TOKENS:
-            break
-        force = False
-        start = compression_start()
-        available = len(HISTORY) - start - 2
-        if available < 4:
-            break
-        batch = min(COMPRESS_BATCH, available)
-        if batch % 2:
-            batch -= 1
-        if batch <= 0:
-            break
-        prior = ""
-        if start:
-            prior = str(HISTORY[0].get("content", ""))[len(SUMMARY_MARKER):].strip()
-        older = HISTORY[start:start + batch]
-        summary = summarize_turns(older, prior)
-        del HISTORY[start:start + batch]
-        archive_turns(older, "compressed")
-        folded += batch
-        if not summary:
-            continue
-        COMPRESSED_TURNS += batch
-        summaries.append(summary)
-        entry = {"role": "assistant", "content": SUMMARY_MARKER + " " + summary}
-        if start:
-            HISTORY[0] = entry
-        else:
-            HISTORY.insert(0, entry)
-    if not folded:
+    if summarize is None:
+        summarize = summarize_turns
+    if count is None:
+        count = count_tokens
+    SUMMARIZE_CALLS = []
+    tokens = sum(count(turn.get("content", "")) for turn in history) + count(SYSTEM_PROMPT)
+    if CONTEXT_TOKENS > 0 and tokens <= CAGE_CONTEXT_TOKENS:
         return None
-    return {"folded": folded, "summaries": summaries}
+    available = list(history)
+    if len(available) < 2:
+        return None
+    batch_n = min(COMPRESS_BATCH, max(2, len(available) - 2))
+    if batch_n % 2:
+        batch_n -= 1
+    if batch_n <= 0:
+        batch_n = 2 if len(available) >= 2 else len(available)
+    older = history[:batch_n]
+    SUMMARIZE_CALLS.append({"turns": len(older)})
+    summary = summarize(older, prior="")
+    del history[:batch_n]
+    archive_turns(older, "compressed")
+    COMPRESSED_TURNS += batch_n
+    entry = {"role": "assistant", "content": LOSSY_MARKER + " " + (summary or "")}
+    history.insert(0, entry)
+    return {"folded": batch_n, "summaries": [summary]}
 
 
 def run_chat(message):
     if not INJECTED:
         raise RuntimeError(
-            "MonkeyCode LLM was not injected: MCAI_LLM_BASE_URL and "
-            "MCAI_LLM_API_KEY are required"
+            "LLM not injected: MCAI_LLM_BASE_URL and MCAI_LLM_API_KEY are required"
         )
     message, trimmed = truncate_message(safe_text(message))
     with HISTORY_LOCK:
-        compress_history()
+        reduce_history(HISTORY)
+        if CAGE_SUMMARIZE:
+            compress_history(HISTORY)
 
         messages = [SystemMessage(content=safe_text(SYSTEM_PROMPT))]
+        index = build_index(load_archive())
+        if index:
+            messages.append(SystemMessage(content="index:\n" + index))
         for turn in HISTORY:
             if turn["role"] == "user":
                 messages.append(HumanMessage(content=safe_text(turn["content"])))
@@ -771,16 +825,21 @@ def run_chat(message):
         reply, trimmed_reply = truncate_message(safe_text(reply))
         HISTORY.append({"role": "user", "content": safe_text(message)})
         HISTORY.append({"role": "assistant", "content": reply})
-        dropped = evict_history(MAX_TURNS)
-        compress_history()
+        dropped = evict_history(HISTORY, CAGE_MAX_TURNS)
+        if CAGE_SUMMARIZE:
+            compress_history(HISTORY)
+        lossy = any(
+            str(turn.get("content", "")).startswith(LOSSY_MARKER) for turn in HISTORY
+        )
         return reply, used, {
             "trimmed_input": trimmed,
             "trimmed_reply": trimmed_reply,
             "evicted": dropped,
             "compressed_turns": COMPRESSED_TURNS,
-            "history_turns": history_pairs(),
-            "context_tokens": CONTEXT_TOKENS,
+            "history_turns": sum(1 for turn in HISTORY if turn.get("role") == "user"),
+            "context_tokens": CAGE_CONTEXT_TOKENS,
             "history_tokens": history_tokens(HISTORY),
+            "lossy_in_context": lossy,
         }
 
 
@@ -788,7 +847,7 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):
-        sys.stderr.write("isolis-agent %s - %s\n" % (self.address_string(), fmt % args))
+        sys.stderr.write("cage-agent %s - %s\n" % (self.address_string(), fmt % args))
 
     def send_json(self, status, payload):
         payload = dict(payload)
@@ -814,8 +873,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, {"ok": True})
             elif path == "/info":
                 with HISTORY_LOCK:
-                    turns = len(HISTORY) // 2
+                    turns = sum(1 for turn in HISTORY if turn.get("role") == "user")
                     used_tokens = history_tokens(HISTORY) + count_tokens(SYSTEM_PROMPT)
+                    lossy = any(
+                        str(turn.get("content", "")).startswith(LOSSY_MARKER)
+                        for turn in HISTORY
+                    )
                 with ARCHIVE_LOCK:
                     archived = len(ARCHIVE)
                 self.send_json(
@@ -823,12 +886,10 @@ class Handler(BaseHTTPRequestHandler):
                     {
                         "ok": True,
                         "framework": AGENT_FRAMEWORK,
-                        "langchain": "https://github.com/langchain-ai/langchain",
-                        "langchain_source": AGENT_SOURCE,
                         "source": AGENT_SOURCE,
                         "profile": AGENT_PROFILE,
                         "install": INSTALL_ENABLED,
-                        "android_home": ANDROID_HOME,
+                        "mode": AGENT_MODE,
                         "model": MODEL,
                         "llm_host": LLM_HOST,
                         "via": "mc-direct",
@@ -838,13 +899,14 @@ class Handler(BaseHTTPRequestHandler):
                         "workspace": WORKSPACE,
                         "history_turns": turns,
                         "history_tokens": used_tokens,
-                        "context_tokens": CONTEXT_TOKENS,
+                        "context_tokens": CAGE_CONTEXT_TOKENS,
                         "context_hard_limit": CONTEXT_HARD_LIMIT,
                         "max_message_chars": MAX_MESSAGE_CHARS,
-                        "max_turns": MAX_TURNS,
+                        "max_turns": CAGE_MAX_TURNS,
                         "compress_batch": COMPRESS_BATCH,
                         "compressed_turns": COMPRESSED_TURNS,
                         "archived_turns": archived,
+                        "lossy_in_context": lossy,
                     },
                 )
             elif path == "/history":
@@ -857,7 +919,7 @@ class Handler(BaseHTTPRequestHandler):
                     200,
                     {
                         "ok": True,
-                        "context_tokens": CONTEXT_TOKENS,
+                        "context_tokens": CAGE_CONTEXT_TOKENS,
                         "history_tokens": tokens,
                         "compressed_turns": COMPRESSED_TURNS,
                         "history": live,
@@ -913,7 +975,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    server = ThreadingHTTPServer(("0.0.0.0", 8080), Handler)
+    bind = os.environ.get("CAGE_BIND", "127.0.0.1").strip() or "127.0.0.1"
+    server = ThreadingHTTPServer((bind, 8080), Handler)
     server.daemon_threads = True
     try:
         server.serve_forever()
