@@ -458,8 +458,11 @@ half second with a three second per-request timeout.
   "workspace": "/work",
   "history_turns": 0,
   "history_tokens": 0,
-  "context_tokens": 60000,
-  "max_message_chars": 48000,
+  "context_tokens": 900000,
+  "context_hard_limit": 1000000,
+  "max_message_chars": 900000,
+  "max_turns": 400,
+  "compress_batch": 40,
   "compressed_turns": 0,
   "archived_turns": 0
 }
@@ -475,7 +478,7 @@ Returns the live conversation and the archive for auditing:
 ```json
 {
   "ok": true,
-  "context_tokens": 60000,
+  "context_tokens": 900000,
   "history_tokens": 120,
   "compressed_turns": 0,
   "history": [{"role": "user", "content": "..."}],
@@ -507,7 +510,7 @@ Success:
     "evicted": 0,
     "compressed_turns": 0,
     "history_turns": 1,
-    "context_tokens": 60000,
+    "context_tokens": 900000,
     "history_tokens": 120
   }
 }
@@ -525,24 +528,27 @@ Errors:
 Conversation memory is bounded on three independent axes. All three MUST be
 implemented; they solve different failure modes.
 
-**Axis 1: turn count.** The runtime keeps a system message plus at most 24
-user/assistant pairs. Older pairs are removed from the front and recorded in an
+**Axis 1: turn count.** The runtime keeps a system message plus at most 400
+user/assistant pairs (`ISOLIS_MAX_TURNS`). Older pairs are removed from the front and recorded in an
 in-memory archive with reason `evicted`.
 
 **Axis 2: per-message size.** Any inbound user message and any outbound assistant
-reply longer than `ISOLIS_MAX_MESSAGE_CHARS` (default 48000 characters) MUST be
+reply longer than `ISOLIS_MAX_MESSAGE_CHARS` (default 900000 characters) MUST be
 truncated before it enters memory. Truncation keeps the head and the tail and
 inserts an explicit marker stating how many characters were removed. This
 prevents one pasted file from consuming the whole budget.
 
 **Axis 3: token budget with automatic compression.** The runtime estimates the
 token size of the live history plus the system prompt and compresses when the
-estimate exceeds `ISOLIS_CONTEXT_TOKENS` (default 60000, `0` disables).
+estimate exceeds `ISOLIS_CONTEXT_TOKENS` (default 900000, `0` disables). The
+budget MUST be clamped to `ISOLIS_CONTEXT_HARD_LIMIT` (default 1000000), the
+measured upstream ceiling of the injected gateway. A configured budget above the
+hard limit MUST be clamped with one notice line rather than failing a request.
 
 Compression works as follows:
 
-1. Fold the oldest batch of turns (up to eight messages) into one summary by
-   asking the same model for a compact briefing.
+1. Fold the oldest batch of turns (`ISOLIS_COMPRESS_BATCH`, default 40 messages)
+   into one summary by asking the same model for a compact briefing.
 2. The summary prompt MUST preserve facts, file paths, commands, versions,
    decisions, errors, and unresolved questions, and MUST cap the result at a
    fixed character budget.
@@ -559,7 +565,8 @@ If compression cannot reach the budget (for example a single oversized exchange)
 the bounded turn count and message cap still hold, so memory cannot grow without
 limit.
 
-The archive keeps the most recent 400 entries and evicts the oldest. Archived
+The archive keeps the most recent `ISOLIS_ARCHIVE_MAX` entries (default 4000)
+and evicts the oldest. Archived
 content is exposed for inspection and is never sent to the model.
 
 The system prompt comes from `ISOLIS_SYSTEM_PROMPT` when set. Otherwise a
@@ -630,17 +637,18 @@ These values make the limits auditable. An implementation MAY choose different
 numbers, but it MUST document them and keep every loop and subprocess bounded.
 
 ```
-MAX_TURNS              24     conversation pairs retained per agent
+MAX_TURNS             400     conversation pairs retained per agent
 MAX_TOOL_STEPS          8     model/tool round trips per chat request
 SHELL_TIMEOUT         120     seconds per run_command call
 INSTALL_TIMEOUT      1800     seconds per install call
 MAX_OUTPUT          20000     characters returned by any single tool
-CONTEXT_TOKENS      60000     token budget before automatic compression
-MAX_MESSAGE_CHARS   48000     per-message character cap
-COMPRESS_BATCH          8     oldest messages folded per compression pass
-SUMMARY_MAX_CHARS    4000     summary length cap
-SUMMARY_INPUT_CHARS 24000     characters of raw turns fed to the summarizer
-ARCHIVE_MAX           400     retained archive entries
+CONTEXT_TOKENS     900000     token budget before automatic compression
+CONTEXT_HARD_LIMIT 1000000    measured upstream token ceiling; budget is clamped to it
+MAX_MESSAGE_CHARS  900000     per-message character cap
+COMPRESS_BATCH         40     oldest messages folded per compression pass
+SUMMARY_MAX_CHARS    8000     summary length cap
+SUMMARY_INPUT_CHARS 60000     characters of raw turns fed to the summarizer
+ARCHIVE_MAX          4000     retained archive entries
 ```
 
 ### 9.3 Image prerequisites for development
@@ -814,7 +822,7 @@ A build is complete only when every item below is observable.
 17. State writes survive interruption without corrupting the file.
 18. `rebuild` recreates the current agent with the same profile and source and a
     freshly built image.
-19. Conversation memory stays bounded: after more than 24 user/assistant pairs
+19. Conversation memory stays bounded: after more than `ISOLIS_MAX_TURNS` pairs
     the agent still answers and `/info` reports a bounded `history_turns`.
 20. A single chat request stops after at most eight tool round trips and returns
     a reply instead of looping forever.
@@ -826,11 +834,18 @@ A build is complete only when every item below is observable.
 23. Repeated compression never produces a second `[compressed history]` entry;
     the existing summary is updated in place.
 24. With `ISOLIS_CONTEXT_TOKENS=0`, compression is disabled, the archive only
-    receives `evicted` entries, and the 24-pair cap still holds.
+    receives `evicted` entries, and the turn cap still holds.
 25. A message longer than `ISOLIS_MAX_MESSAGE_CHARS` is stored truncated with a
     marker, and `/chat` reports `trimmed_input: true`.
 26. `GET /history` returns both the live history and the archive with matching
     counters.
+27. A budget above 1000000 is clamped with one notice line; `/info` reports the
+    clamped `context_tokens` and the `context_hard_limit`.
+28. A single message near the upstream ceiling (600000 characters, about 169000
+    tokens) is accepted and answered without a 413 or a 5xx.
+29. After the budget is exceeded at large input sizes, compression reduces the
+    live history and a fact stated in the first message is still recoverable
+    from the summary.
 
 ---
 

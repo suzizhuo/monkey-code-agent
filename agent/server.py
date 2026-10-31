@@ -51,7 +51,6 @@ def default_system_prompt():
 
 SYSTEM_PROMPT = os.environ.get("ISOLIS_SYSTEM_PROMPT", "").strip() or default_system_prompt()
 
-MAX_TURNS = 24
 MAX_TOOL_STEPS = 8
 WORKSPACE = os.environ.get("ISOLIS_WORKSPACE", "/work")
 SHELL_TIMEOUT = 120
@@ -69,13 +68,22 @@ def _int_env(name, default):
         return default
 
 
-CONTEXT_TOKENS = _int_env("ISOLIS_CONTEXT_TOKENS", 60000)
-MAX_MESSAGE_CHARS = _int_env("ISOLIS_MAX_MESSAGE_CHARS", 48000)
-COMPRESS_BATCH = 8
-SUMMARY_MAX_CHARS = 4000
-SUMMARY_INPUT_CHARS = 24000
-ARCHIVE_MAX = 400
+CONTEXT_TOKENS = _int_env("ISOLIS_CONTEXT_TOKENS", 900000)
+MAX_MESSAGE_CHARS = _int_env("ISOLIS_MAX_MESSAGE_CHARS", 900000)
+MAX_TURNS = _int_env("ISOLIS_MAX_TURNS", 400)
+COMPRESS_BATCH = _int_env("ISOLIS_COMPRESS_BATCH", 40)
+SUMMARY_MAX_CHARS = _int_env("ISOLIS_SUMMARY_MAX_CHARS", 8000)
+SUMMARY_INPUT_CHARS = _int_env("ISOLIS_SUMMARY_INPUT_CHARS", 60000)
+ARCHIVE_MAX = _int_env("ISOLIS_ARCHIVE_MAX", 4000)
+CONTEXT_HARD_LIMIT = _int_env("ISOLIS_CONTEXT_HARD_LIMIT", 1000000)
 SUMMARY_MARKER = "[compressed history]"
+
+if CONTEXT_TOKENS > CONTEXT_HARD_LIMIT:
+    sys.stderr.write(
+        "isolis-agent: ISOLIS_CONTEXT_TOKENS %d exceeds the upstream limit %d; "
+        "clamping\n" % (CONTEXT_TOKENS, CONTEXT_HARD_LIMIT)
+    )
+    CONTEXT_TOKENS = CONTEXT_HARD_LIMIT
 
 BASE_URL = os.environ.get("MCAI_LLM_BASE_URL", "").strip()
 API_KEY = os.environ.get("MCAI_LLM_API_KEY", "").strip()
@@ -728,7 +736,10 @@ class Handler(BaseHTTPRequestHandler):
                         "history_turns": turns,
                         "history_tokens": used_tokens,
                         "context_tokens": CONTEXT_TOKENS,
+                        "context_hard_limit": CONTEXT_HARD_LIMIT,
                         "max_message_chars": MAX_MESSAGE_CHARS,
+                        "max_turns": MAX_TURNS,
+                        "compress_batch": COMPRESS_BATCH,
                         "compressed_turns": COMPRESSED_TURNS,
                         "archived_turns": archived,
                     },

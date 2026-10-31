@@ -389,29 +389,41 @@ def detect_llm():
     }
 
 
-def max_message_chars():
-    raw = os.environ.get("ISOLIS_MAX_MESSAGE_CHARS", "").strip()
+CONTEXT_HARD_LIMIT = 1000000
+CONTEXT_DEFAULT = 900000
+MESSAGE_CHARS_DEFAULT = 900000
+MAX_TURNS_DEFAULT = 400
+
+
+def _env_int(name, default):
+    raw = os.environ.get(name, "").strip()
     if not raw:
-        return 48000
+        return default
     try:
         value = int(raw)
     except ValueError:
-        raise IsolisError("ISOLIS_MAX_MESSAGE_CHARS must be an integer (got %r)" % raw)
+        raise IsolisError("%s must be an integer (got %r)" % (name, raw))
     if value < 0:
-        raise IsolisError("ISOLIS_MAX_MESSAGE_CHARS must be zero or positive")
+        raise IsolisError("%s must be zero or positive" % name)
     return value
 
 
+def max_message_chars():
+    return _env_int("ISOLIS_MAX_MESSAGE_CHARS", MESSAGE_CHARS_DEFAULT)
+
+
+def max_turns():
+    return _env_int("ISOLIS_MAX_TURNS", MAX_TURNS_DEFAULT)
+
+
 def context_tokens():
-    raw = os.environ.get("ISOLIS_CONTEXT_TOKENS", "").strip()
-    if not raw:
-        return 60000
-    try:
-        value = int(raw)
-    except ValueError:
-        raise IsolisError("ISOLIS_CONTEXT_TOKENS must be an integer (got %r)" % raw)
-    if value < 0:
-        raise IsolisError("ISOLIS_CONTEXT_TOKENS must be zero or positive")
+    value = _env_int("ISOLIS_CONTEXT_TOKENS", CONTEXT_DEFAULT)
+    if value > CONTEXT_HARD_LIMIT:
+        print(
+            "notice: ISOLIS_CONTEXT_TOKENS %d exceeds the upstream limit %d; "
+            "clamping to %d" % (value, CONTEXT_HARD_LIMIT, CONTEXT_HARD_LIMIT)
+        )
+        return CONTEXT_HARD_LIMIT
     return value
 
 
@@ -694,7 +706,13 @@ def start_container(name, container, port, llm, profile="tooled",
         "-e",
         "ISOLIS_CONTEXT_TOKENS=" + str(context_tokens()),
         "-e",
+        "ISOLIS_CONTEXT_HARD_LIMIT=" + str(CONTEXT_HARD_LIMIT),
+        "-e",
         "ISOLIS_MAX_MESSAGE_CHARS=" + str(max_message_chars()),
+        "-e",
+        "ISOLIS_MAX_TURNS=" + str(max_turns()),
+        "-e",
+        "ISOLIS_ARCHIVE_MAX=" + str(_env_int("ISOLIS_ARCHIVE_MAX", 4000)),
         "-e",
         "MCAI_LLM_BASE_URL",
         "-e",
@@ -893,8 +911,8 @@ def cmd_status():
     current_entry = agents.get(current) or {}
     print(isolation_summary(current_entry.get("profile", profile_from_env())))
     print(
-        "context budget: %d tokens, message cap: %d chars (budget 0 disables compression)"
-        % (context_tokens(), max_message_chars())
+        "context budget: %d tokens of %d upstream max, turns %d, message cap %d chars"
+        % (context_tokens(), CONTEXT_HARD_LIMIT, max_turns(), max_message_chars())
     )
     source = current_entry.get("source")
     if source:
@@ -991,9 +1009,16 @@ def cmd_doctor():
     try:
         budget = context_tokens()
         if budget:
-            print("  [ok]   context budget: %d tokens (auto compression on)" % budget)
+            print(
+                "  [ok]   context budget: %d tokens of %d upstream max (auto compression on)"
+                % (budget, CONTEXT_HARD_LIMIT)
+            )
         else:
-            print("  [warn] context budget: 0 (auto compression off, 24-turn cap only)")
+            print("  [warn] context budget: 0 (auto compression off, turn cap only)")
+        print(
+            "  [ok]   limits: turns %d, message %d chars"
+            % (max_turns(), max_message_chars())
+        )
     except IsolisError as exc:
         print("  [fail] %s" % exc)
         ok = False
