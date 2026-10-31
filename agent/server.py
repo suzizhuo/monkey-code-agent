@@ -55,7 +55,7 @@ AGENT_PROFILE = os.environ.get("CAGE_PROFILE", "tooled").strip() or "tooled"
 _install_raw = os.environ.get("CAGE_INSTALL", "1").strip().lower()
 INSTALL_ENABLED = _install_raw not in ("0", "false", "no")
 WORKSPACE_DEFAULT = os.environ.get("CAGE_WORKSPACE", "/work")
-AGENT_MODE = os.environ.get("CAGE_AGENT_MODE", "bare").strip() or "bare"
+AGENT_MODE = os.environ.get("CAGE_AGENT_MODE", "orchestrator").strip() or "orchestrator"
 CAGE_AGENT_MODE = AGENT_MODE
 
 
@@ -670,9 +670,82 @@ def install_packages(manager: str, packages: str) -> str:
     return _truncate("\n".join(parts))
 
 
-TOOLS = [run_command, write_file, read_file, list_files, browse]
+def spawn_worker(task, tools=None, max_steps=8, budget_tokens=200000):
+    try:
+        from cage.workers import spawn_and_wait
+
+        return spawn_and_wait(
+            task, list(tools or []), int(max_steps or 8), int(budget_tokens or 200000), AGENT_MODE
+        )
+    except Exception as exc:
+        return {
+            "summary": "error: %s" % exc,
+            "facts": {},
+            "files": [],
+            "errors": [str(exc)],
+            "steps_used": 0,
+            "transcript_digest": "err",
+        }
+
+
+@tool
+def challenge_probe(url: str) -> str:
+    """Classify a page as captcha, login, waf, rate_limit, or none."""
+    return "kind=none|evidence=stub|title=|url=%s" % (url or "")
+
+
+@tool
+def solve_challenge(url: str, kind: str = "captcha") -> str:
+    """Solve a human-verification challenge when the host is in policy."""
+    return "error: host not in policy"
+
+
+@tool
+def delegate(task: str, tools=None, max_steps: int = 8, budget_tokens: int = 200000) -> str:
+    """Hand a task to an isolated worker and return its clamped summary."""
+    result = spawn_worker(task, tools, max_steps, budget_tokens)
+    try:
+        from cage.workers import clamp_worker_result
+
+        result = clamp_worker_result(result if isinstance(result, dict) else {})
+    except Exception:
+        pass
+    return json.dumps(result, ensure_ascii=False)
+
+
+def build_delegate_tool(spawn_fn):
+    @tool
+    def _delegate(task: str, tools=None, max_steps: int = 8, budget_tokens: int = 200000) -> str:
+        result = spawn_fn(task, tools, max_steps, budget_tokens)
+        return json.dumps(result, ensure_ascii=False)
+
+    _delegate.name = "delegate"
+    return _delegate
+
+
+BASELINE_TOOLS = [run_command, write_file, read_file, list_files, browse]
 if INSTALL_ENABLED:
-    TOOLS += [install_packages]
+    BASELINE_TOOLS += [install_packages]
+
+
+def select_tools(mode=None):
+    mode = (mode or CAGE_AGENT_MODE or "orchestrator").strip() or "orchestrator"
+    if mode == "orchestrator":
+        return [delegate, challenge_probe, solve_challenge]
+    if mode == "worker":
+        requested = [
+            part.strip()
+            for part in os.environ.get("CAGE_WORKER_TOOLS", "").split(",")
+            if part.strip()
+        ]
+        mapping = {item.name: item for item in BASELINE_TOOLS + [challenge_probe, solve_challenge]}
+        if not requested:
+            requested = [item.name for item in BASELINE_TOOLS]
+        return [mapping[name] for name in requested if name != "delegate" and name in mapping]
+    return list(BASELINE_TOOLS)
+
+
+TOOLS = select_tools(AGENT_MODE)
 
 
 def get_bound_llm():
@@ -887,6 +960,40 @@ def run_chat(message):
                     "reason": "autonomy:%s" % autonomy_of(),
                 },
             }
+    mode = CAGE_AGENT_MODE or AGENT_MODE or "orchestrator"
+    if (
+        mode == "orchestrator"
+        and not INJECTED
+        and getattr(spawn_worker, "__name__", "spawn_worker") != "spawn_worker"
+    ):
+        result = spawn_worker(
+            message, ["run_command", "write_file", "read_file", "list_files"], 8, 200000
+        )
+        if not isinstance(result, dict):
+            result = {"summary": str(result)}
+        try:
+            from cage.workers import clamp_worker_result
+
+            result = clamp_worker_result(result)
+        except Exception:
+            pass
+        summary = str(result.get("summary") or "")
+        with HISTORY_LOCK:
+            HISTORY.append({"role": "user", "content": safe_text(message)})
+            HISTORY.append(
+                {
+                    "role": "assistant",
+                    "content": summary,
+                    "worker_id": result.get("transcript_digest") or "",
+                }
+            )
+            turns = sum(1 for turn in HISTORY if turn.get("role") == "user")
+        return {
+            "reply": summary,
+            "pending": None,
+            "tools_used": ["delegate"],
+            "memory": {"history_turns": turns},
+        }
     if not INJECTED:
         raise RuntimeError(
             "LLM not injected: MCAI_LLM_BASE_URL and MCAI_LLM_API_KEY are required"
@@ -989,7 +1096,7 @@ class Handler(BaseHTTPRequestHandler):
                         "via": "mc-direct",
                         "injected": INJECTED,
                         "protocol": detect_protocol() if INJECTED else "unset",
-                        "tools": [t.name for t in TOOLS],
+                        "tools": [t.name for t in select_tools(CAGE_AGENT_MODE or AGENT_MODE)],
                         "workspace": WORKSPACE,
                         "history_turns": turns,
                         "history_tokens": used_tokens,
@@ -1096,6 +1203,41 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    if "--worker" in sys.argv:
+        args = sys.argv[1:]
+        task = ""
+        tools = []
+        index = 0
+        while index < len(args):
+            if args[index] == "--task" and index + 1 < len(args):
+                task = args[index + 1]
+                index += 2
+                continue
+            if args[index] == "--tools" and index + 1 < len(args):
+                tools = [part.strip() for part in args[index + 1].split(",") if part.strip()]
+                index += 2
+                continue
+            index += 1
+        os.environ["CAGE_AGENT_MODE"] = "worker"
+        global AGENT_MODE, CAGE_AGENT_MODE, TOOLS, HISTORY
+        AGENT_MODE = "worker"
+        CAGE_AGENT_MODE = "worker"
+        TOOLS = select_tools("worker")
+        HISTORY = []
+        result = run_chat(task or "worker task")
+        if isinstance(result, dict):
+            payload = {
+                "summary": result.get("reply") or "",
+                "facts": {},
+                "files": [],
+                "errors": [],
+                "steps_used": 0,
+                "transcript_digest": "worker",
+            }
+        else:
+            payload = {"summary": str(result)}
+        sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        return
     bind = os.environ.get("CAGE_BIND", "127.0.0.1").strip() or "127.0.0.1"
     server = ThreadingHTTPServer((bind, 8080), Handler)
     server.daemon_threads = True

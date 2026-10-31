@@ -163,6 +163,16 @@ class Handler(BaseHTTPRequestHandler):
                 200, {"ok": True, "agents": agents, "current": st.get("current")}
             )
             return
+        if path == "/api/workers" and method == "GET":
+            from cage.state import home
+
+            root = home() / "logs" / "workers"
+            items = []
+            if root.is_dir():
+                for path_item in sorted(root.glob("*.jsonl")):
+                    items.append({"id": path_item.stem, "path": str(path_item)})
+            self._send_json(200, {"ok": True, "workers": items})
+            return
         if path == "/api/agents" and method == "GET":
             st = state.load_state()
             agents = [

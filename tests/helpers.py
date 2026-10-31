@@ -47,5 +47,18 @@ def http_post(port, path, payload):
         return exc.code, body, dict(exc.headers)
 
 
-def agent_info_via_http(port):
+def agent_info_via_http(port=None):
+    if port is None:
+        import threading
+        from http.server import ThreadingHTTPServer
+
+        import agent as mod
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), mod.Handler)
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        try:
+            return http_get(srv.server_address[1], "/info")
+        finally:
+            srv.shutdown()
     return http_get(port, "/info")

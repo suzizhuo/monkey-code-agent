@@ -90,6 +90,7 @@ def test_health_info_and_tools_count(monkeypatch):
     monkeypatch.setenv("MCAI_LLM_BASE_URL", "https://gw.example/v1")
     monkeypatch.setenv("MCAI_LLM_API_KEY", "k" * 12)
     monkeypatch.setenv("MCAI_LLM_MODEL", "m")
+    monkeypatch.setenv("CAGE_AGENT_MODE", "bare")
     mod = load_agent()
     srv = ThreadingHTTPServer(("127.0.0.1", 0), mod.Handler)
     port = srv.server_address[1]
@@ -110,6 +111,7 @@ def test_info_strict_tools_count_and_install_flag(monkeypatch):
     monkeypatch.setenv("MCAI_LLM_API_KEY", "k" * 12)
     monkeypatch.setenv("MCAI_LLM_MODEL", "m")
     monkeypatch.setenv("CAGE_INSTALL", "0")
+    monkeypatch.setenv("CAGE_AGENT_MODE", "bare")
     mod = load_agent()
     srv = ThreadingHTTPServer(("127.0.0.1", 0), mod.Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
