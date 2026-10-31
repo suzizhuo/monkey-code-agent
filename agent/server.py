@@ -49,6 +49,11 @@ except ImportError:
         return deco
 
 
+try:
+    import pytesseract
+except ImportError:
+    pytesseract = None
+
 AGENT_FRAMEWORK = os.environ.get("CAGE_FRAMEWORK", "langchain").strip() or "langchain"
 AGENT_SOURCE = os.environ.get("CAGE_SOURCE", "local").strip() or "local"
 AGENT_PROFILE = os.environ.get("CAGE_PROFILE", "tooled").strip() or "tooled"
@@ -688,16 +693,119 @@ def spawn_worker(task, tools=None, max_steps=8, budget_tokens=200000):
         }
 
 
+def resolve_solver(env):
+    env = env or os.environ
+    cmd = (env.get("CAGE_SOLVER_CMD") or "").strip()
+    if cmd:
+        def _run(png_path):
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    shell=True,
+                    input=(png_path or "") + "\n",
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+            except Exception as exc:
+                return "error: solver unavailable: %s" % exc
+            out = (proc.stdout or "").strip()
+            if out:
+                return out
+            return "error: solver unavailable"
+
+        return _run
+    tess = pytesseract
+    if tess is not None:
+        def _ocr(png_path):
+            try:
+                from PIL import Image
+
+                return tess.image_to_string(Image.open(png_path))
+            except Exception as exc:
+                return "error: solver unavailable: %s" % exc
+
+        return _ocr
+    return lambda png: "error: solver unavailable"
+
+
+def _page_fields_and_text(url):
+    title, html, fields = "", "", []
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            title = page.title() or ""
+            html = page.content() or ""
+            try:
+                fields = page.eval_on_selector_all(
+                    "input,textarea,select",
+                    "els => els.map(e => e.getAttribute('name') || '')",
+                )
+            except Exception:
+                fields = []
+            browser.close()
+    except Exception:
+        try:
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                html = resp.read().decode("utf-8", "replace")
+        except Exception:
+            html = ""
+        match = re.search(r"<title>(.*?)</title>", html, re.S | re.I)
+        title = match.group(1).strip() if match else ""
+        fields = re.findall(r'name=["\']([^"\']+)["\']', html)
+    body = re.sub(r"<[^>]+>", " ", html)[:4000]
+    return title, body, fields
+
+
 @tool
 def challenge_probe(url: str) -> str:
     """Classify a page as captcha, login, waf, rate_limit, or none."""
-    return "kind=none|evidence=stub|title=|url=%s" % (url or "")
+    title, body, fields = _page_fields_and_text(url or "")
+    try:
+        from cage.challengerules import classify_page
+
+        kind, evidence = classify_page(title, body, fields)
+    except Exception as exc:
+        kind, evidence = "none", "error:%s" % exc
+    return "kind=%s|evidence=%s|title=%s|url=%s" % (kind, evidence, title, url or "")
 
 
 @tool
 def solve_challenge(url: str, kind: str = "captcha") -> str:
     """Solve a human-verification challenge when the host is in policy."""
-    return "error: host not in policy"
+    from cage.challengerules import policy_allows, url_allows
+
+    parsed = urlparse(url or "")
+    host = parsed.netloc.split("@")[-1].split(":")[0]
+    allow = os.environ.get("CAGE_CHALLENGE_HOSTS", "")
+    policy = os.environ.get("CAGE_URL_POLICY", "all")
+    if not url_allows(url or "", policy, LLM_HOST) or not policy_allows(host, allow):
+        return "error: host not in policy"
+    png = os.path.join(WORKSPACE, "_challenge.png")
+    try:
+        os.makedirs(WORKSPACE, exist_ok=True)
+    except OSError:
+        pass
+    escalated = False
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            page.screenshot(path=png)
+            browser.close()
+    except Exception:
+        escalated = True
+    text = resolve_solver(os.environ)(png)
+    if str(text).startswith("error:"):
+        escalated = True
+    return "solved=%s|escalated=%s|kind=%s|url=%s" % (text, str(escalated).lower(), kind or "captcha", url or "")
 
 
 @tool
