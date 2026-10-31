@@ -177,3 +177,6 @@
 
 # Isolis runtime state
 .isolis/
+
+# Cage runtime state
+.cage/
