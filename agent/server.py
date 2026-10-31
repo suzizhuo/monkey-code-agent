@@ -88,6 +88,10 @@ if CONTEXT_TOKENS > CONTEXT_HARD_LIMIT:
 BASE_URL = os.environ.get("MCAI_LLM_BASE_URL", "").strip()
 API_KEY = os.environ.get("MCAI_LLM_API_KEY", "").strip()
 MODEL = os.environ.get("MCAI_LLM_MODEL", "").strip()
+FALLBACK_MODEL = (
+    os.environ.get("ISOLIS_FALLBACK_MODEL", "").strip()
+    or os.environ.get("ISOLIS_DEFAULT_MODEL", "").strip()
+)
 INJECTED = bool(BASE_URL and API_KEY)
 LLM_HOST = urlparse(BASE_URL).netloc if BASE_URL else ""
 
@@ -320,6 +324,13 @@ def flip_protocol():
         LLM = None
 
 
+def use_model(model):
+    global MODEL, LLM
+    MODEL = model
+    with LLM_LOCK:
+        LLM = None
+
+
 def invoke_chat(messages):
     bound = get_bound_llm()
     if bound is None:
@@ -335,13 +346,22 @@ def call_with_protocol_retry(messages):
         status = error_status(err)
         text = safe_text(str(err)).lower()
         mismatch = status in (404, 405) or "method not allowed" in text
-        if not mismatch:
-            raise RuntimeError(describe_error(err)) from err
-        flip_protocol()
-        try:
-            return invoke_chat(messages)
-        except Exception as err2:
-            raise RuntimeError(describe_error(err2)) from err2
+        if mismatch:
+            flip_protocol()
+            try:
+                return invoke_chat(messages)
+            except Exception as err2:
+                err = err2
+                status = error_status(err2)
+                text = safe_text(str(err2)).lower()
+        alt = FALLBACK_MODEL
+        if (status == 403 or "forbidden" in text) and alt and alt != MODEL:
+            use_model(alt)
+            try:
+                return invoke_chat(messages)
+            except Exception as err3:
+                raise RuntimeError(describe_error(err3)) from err3
+        raise RuntimeError(describe_error(err)) from err
 
 
 def _truncate(text):

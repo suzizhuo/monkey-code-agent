@@ -31,7 +31,12 @@ CONTAINER_PORT = 8080
 STATE_DIR = ".isolis"
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
 AGENT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent")
-BANNED_MODELS = {"auto", "step-5-preview", "deepseek-chat"}
+BANNED_MODELS = {
+    "auto",
+    "step-5-preview",
+    "deepseek-chat",
+    "deepseek-flash",
+}
 DEFAULT_MODEL = "monkeycode-pro/gpt-5.6-terra"
 MODEL_PREFIX = "monkeycode-pro/"
 PROFILES = {
@@ -375,9 +380,18 @@ def models_url(base):
     return base.rstrip("/") + "/models"
 
 
+def is_banned_model(model_id):
+    name = (model_id or "").strip()
+    if not name:
+        return False
+    if name in BANNED_MODELS:
+        return True
+    return name.rsplit("/", 1)[-1] in BANNED_MODELS
+
+
 def pick_model(injected, body):
     candidate = (injected or "").strip()
-    if candidate and candidate not in BANNED_MODELS:
+    if candidate and not is_banned_model(candidate):
         return candidate
     fallback = os.environ.get("ISOLIS_DEFAULT_MODEL", "").strip()
     items = body.get("data") if isinstance(body, dict) else None
@@ -385,16 +399,18 @@ def pick_model(injected, body):
         usable = []
         for item in items:
             model_id = item.get("id") if isinstance(item, dict) else None
-            if isinstance(model_id, str) and model_id not in BANNED_MODELS:
+            if isinstance(model_id, str) and not is_banned_model(model_id):
                 usable.append(model_id)
         for model_id in usable:
             if model_id.startswith(MODEL_PREFIX):
                 return model_id
-        if fallback:
+        if fallback and not is_banned_model(fallback):
             return fallback
         if usable:
             return usable[0]
-    return fallback or DEFAULT_MODEL
+    if fallback and not is_banned_model(fallback):
+        return fallback
+    return DEFAULT_MODEL
 
 
 def detect_llm():
@@ -767,6 +783,10 @@ def start_container(name, container, port, llm, profile="tooled",
         "MCAI_LLM_API_KEY",
         "-e",
         "MCAI_LLM_MODEL=" + llm["model"],
+        "-e",
+        "ISOLIS_FALLBACK_MODEL=" + (
+            os.environ.get("ISOLIS_DEFAULT_MODEL", "").strip() or DEFAULT_MODEL
+        ),
         tag,
     ]
     run_docker(args, timeout=300)
