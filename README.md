@@ -4,6 +4,8 @@
 
 分阶段实现提示词在 `prompts/`（先读 `prompts/README.md`）。权威规格：`specs/2026-10-31-cage-design.md`、`plans/2026-10-31-cage.md`。
 
+操作日志（推送人、提交清单、复现脚本）：`logs/2026-10-31-operation.md`。
+
 ## 三分钟上手
 
 ```bash
