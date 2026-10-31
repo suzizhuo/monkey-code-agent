@@ -216,7 +216,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/chat" and method == "POST":
             body = self._read_json()
             message = body.get("message")
-            if not isinstance(message, str) or not message.strip():
+            confirm = bool(body.get("confirm"))
+            if not confirm and (not isinstance(message, str) or not message.strip()):
                 raise CageError("message is required")
             agent = body.get("agent")
             if agent:
@@ -226,8 +227,15 @@ class Handler(BaseHTTPRequestHandler):
                     st["current"] = chosen
                     state.save_state(st)
             _name, port = cli.ensure_chat_agent()
-            reply = cli.chat_request(port, message)
-            self._send_json(200, {"ok": True, "reply": reply})
+            payload = {"message": message or "", "confirm": True} if confirm else message
+            reply = cli.chat_request(port, payload)
+            if isinstance(reply, dict):
+                out = {"ok": True, "reply": reply.get("reply") or ""}
+                if reply.get("pending"):
+                    out["pending"] = reply["pending"]
+                self._send_json(200, out)
+            else:
+                self._send_json(200, {"ok": True, "reply": reply})
             return
         if path == "/api/history" and method == "GET":
             agent = (query.get("agent") or [None])[0]

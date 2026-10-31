@@ -56,6 +56,72 @@ _install_raw = os.environ.get("CAGE_INSTALL", "1").strip().lower()
 INSTALL_ENABLED = _install_raw not in ("0", "false", "no")
 WORKSPACE_DEFAULT = os.environ.get("CAGE_WORKSPACE", "/work")
 AGENT_MODE = os.environ.get("CAGE_AGENT_MODE", "bare").strip() or "bare"
+CAGE_AGENT_MODE = AGENT_MODE
+
+
+def autonomy_of():
+    return os.environ.get("CAGE_AUTONOMY", "auto").strip().lower() or "auto"
+
+
+def auto_confirm():
+    raw = os.environ.get("CAGE_AUTO_CONFIRM", "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _decide_tool(name, args):
+    try:
+        from cage.autonomy import decide
+
+        return decide(name, args, autonomy_of())
+    except Exception:
+        level = autonomy_of()
+        destructive = {
+            "install_packages",
+            "solve_challenge",
+            "browse",
+            "git_publish",
+        }
+        if level == "manual":
+            return "confirm"
+        if level == "assisted" and name in destructive:
+            return "confirm"
+        return "run"
+
+
+def _inferred_install(message):
+    text = message or ""
+    lowered = text.lower()
+    if "apt" in lowered or "install_packages" in lowered or "装" in text:
+        return "install_packages", {"manager": "apt", "packages": "tree"}
+    return None
+
+
+def _emit_audit(tool, args, output, status, duration_ms):
+    rec = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "agent": os.environ.get("CAGE_AGENT_NAME", "default"),
+        "tool": tool,
+        "args": args or {},
+        "output_len": len(str(output or "")),
+        "status": status,
+        "duration_ms": duration_ms,
+    }
+    try:
+        from cage.autonomy import audit_record
+
+        rec = audit_record(
+            rec["ts"],
+            rec["agent"],
+            tool,
+            args or {},
+            rec["output_len"],
+            status,
+            duration_ms,
+        )
+    except Exception:
+        pass
+    sys.stdout.write("CAGE_AUDIT " + json.dumps(rec, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
 
 
 def default_system_prompt():
@@ -639,7 +705,11 @@ def run_tool_loop(messages, bound):
                 output = "error: unknown tool %s" % name
             else:
                 try:
+                    if _decide_tool(name, args) == "confirm" and not auto_confirm():
+                        return None, [{"pending": True, "tool": name, "args": args}]
+                    started = time.time()
                     output = handler.invoke(args)
+                    _emit_audit(name, args, output, "ok", int((time.time() - started) * 1000))
                 except Exception as exc:
                     output = "error: %s" % exc
             output = _truncate(safe_text(str(output)))
@@ -799,6 +869,24 @@ def compress_history(history, summarize=None, count=None):
 
 
 def run_chat(message):
+    confirm = False
+    if isinstance(message, dict):
+        confirm = bool(message.get("confirm"))
+        message = message.get("message") or ""
+    if confirm:
+        os.environ["CAGE_AUTO_CONFIRM"] = "1"
+    inferred = _inferred_install(message)
+    if inferred and not auto_confirm():
+        tool, args = inferred
+        if _decide_tool(tool, args) == "confirm":
+            return {
+                "reply": "pending confirmation for %s" % tool,
+                "pending": {
+                    "tool": tool,
+                    "args": args,
+                    "reason": "autonomy:%s" % autonomy_of(),
+                },
+            }
     if not INJECTED:
         raise RuntimeError(
             "LLM not injected: MCAI_LLM_BASE_URL and MCAI_LLM_API_KEY are required"
@@ -831,7 +919,7 @@ def run_chat(message):
         lossy = any(
             str(turn.get("content", "")).startswith(LOSSY_MARKER) for turn in HISTORY
         )
-        return reply, used, {
+        memory = {
             "trimmed_input": trimmed,
             "trimmed_reply": trimmed_reply,
             "evicted": dropped,
@@ -840,6 +928,12 @@ def run_chat(message):
             "context_tokens": CAGE_CONTEXT_TOKENS,
             "history_tokens": history_tokens(HISTORY),
             "lossy_in_context": lossy,
+        }
+        return {
+            "reply": reply,
+            "pending": None,
+            "tools_used": used,
+            "memory": memory,
         }
 
 
@@ -907,6 +1001,23 @@ class Handler(BaseHTTPRequestHandler):
                         "compressed_turns": COMPRESSED_TURNS,
                         "archived_turns": archived,
                         "lossy_in_context": lossy,
+                        "autonomy": autonomy_of(),
+                        "auto_actions_used": (lambda u: int((u or {}).get("count") or 0))(
+                            {}
+                        ),
+                        "workers_spawned": int(os.environ.get("CAGE_WORKERS_SPAWNED", "0") or 0),
+                        "challenge_policy_hosts": len(
+                            [
+                                p
+                                for p in os.environ.get("CAGE_CHALLENGE_HOSTS", "").split(",")
+                                if p.strip()
+                            ]
+                        ),
+                        "action_budget_left": max(
+                            0,
+                            int(os.environ.get("CAGE_ACTION_BUDGET", "500") or 500),
+                        ),
+                        "audit_stream": True,
                     },
                 )
             elif path == "/history":
@@ -953,20 +1064,30 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(400, {"ok": False, "error": "message is empty"})
             return
         message = data.get("message")
-        if not isinstance(message, str) or not message.strip():
+        confirm = bool(data.get("confirm"))
+        if not confirm and (not isinstance(message, str) or not message.strip()):
             self.send_json(400, {"ok": False, "error": "message is empty"})
             return
         try:
-            reply, tools_used, memory = run_chat(safe_text(message))
-            self.send_json(
-                200,
-                {
-                    "ok": True,
-                    "reply": reply,
-                    "tools_used": tools_used,
-                    "memory": memory,
-                },
-            )
+            payload = {"message": safe_text(message or ""), "confirm": True} if confirm else safe_text(message or "")
+            result = run_chat(payload)
+            if isinstance(result, tuple):
+                reply, tools_used, memory = result
+                pending = None
+            else:
+                reply = result.get("reply")
+                tools_used = result.get("tools_used")
+                memory = result.get("memory")
+                pending = result.get("pending")
+            body = {
+                "ok": True,
+                "reply": reply,
+                "tools_used": tools_used,
+                "memory": memory,
+            }
+            if pending:
+                body["pending"] = pending
+            self.send_json(200, body)
         except Exception as exc:
             self.send_json(
                 500,

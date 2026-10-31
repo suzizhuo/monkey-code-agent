@@ -148,7 +148,7 @@ def verify_agent(port):
     return info
 
 
-def entry_record(name, handle, port, info, llm, profile, source, mode, created_at):
+def entry_record(name, handle, port, info, llm, profile, source, mode, created_at, autonomy="auto"):
     return {
         "name": name,
         "container": handle,
@@ -159,7 +159,16 @@ def entry_record(name, handle, port, info, llm, profile, source, mode, created_a
         "source": source,
         "mode": mode,
         "created_at": created_at,
+        "autonomy": autonomy or "auto",
     }
+
+
+def resolve_autonomy(explicit=None):
+    raw = (explicit or "").strip() or os.environ.get("CAGE_AUTONOMY", "").strip() or "auto"
+    level = raw.lower()
+    if level not in ("manual", "assisted", "auto"):
+        raise CageError("unknown autonomy: %s (choose: manual, assisted, auto)" % raw)
+    return level
 
 
 def reachable(url, timeout=8):
@@ -210,7 +219,7 @@ def _choose_port(st):
     return allocate_port(recorded, set(), listening_ports(), {SERVE_PORT})
 
 
-def cmd_init(name_arg=None, force_image=False, llm=None, profile=None, source=None):
+def cmd_init(name_arg=None, force_image=False, llm=None, profile=None, source=None, autonomy=None):
     if llm is None:
         llm = detect_llm()
         print(
@@ -219,6 +228,7 @@ def cmd_init(name_arg=None, force_image=False, llm=None, profile=None, source=No
         )
     mode = detect_mode()
     rt = runtime_for(mode)
+    level = resolve_autonomy(autonomy)
 
     raw = name_arg if name_arg is not None else DEFAULT_NAME
     name = sanitize_name(raw) or DEFAULT_NAME
@@ -268,6 +278,7 @@ def cmd_init(name_arg=None, force_image=False, llm=None, profile=None, source=No
                         src,
                         mode,
                         record.get("created_at", now_iso()),
+                        autonomy=level,
                     )
                     save_state(st)
                 print("agent '%s' reused on 127.0.0.1:%d" % (name, port))
@@ -289,6 +300,7 @@ def cmd_init(name_arg=None, force_image=False, llm=None, profile=None, source=No
         "MCAI_LLM_MODEL": llm["model"],
         "CAGE_SOURCE": src,
         "CAGE_IMAGE": tag,
+        "CAGE_AUTONOMY": level,
     }
     handle = rt.start(name, port, key, env)
     if not wait_health(port, 45):
@@ -309,7 +321,7 @@ def cmd_init(name_arg=None, force_image=False, llm=None, profile=None, source=No
         st = load_state()
         st["current"] = name
         st["agents"][name] = entry_record(
-            name, handle, port, info, llm, key, src, mode, now_iso()
+            name, handle, port, info, llm, key, src, mode, now_iso(), autonomy=level
         )
         save_state(st)
     print("agent '%s' ready on 127.0.0.1:%d (image %s)" % (name, port, tag))
@@ -592,7 +604,7 @@ def chat_request(port, message, timeout=120):
     status, body = http_json(
         "POST",
         "http://127.0.0.1:%d/chat" % port,
-        payload={"message": message},
+        payload=message if isinstance(message, dict) else {"message": message},
         timeout=timeout,
     )
     if status >= 400 or not isinstance(body, dict) or body.get("ok") is not True:
@@ -600,6 +612,8 @@ def chat_request(port, message, timeout=120):
         if not error:
             error = "HTTP %d" % status
         raise CageError(str(error))
+    if body.get("pending"):
+        return body
     reply = body.get("reply")
     if not isinstance(reply, str):
         raise CageError("agent returned an empty reply")
@@ -705,6 +719,26 @@ def chat_loop(port):
             continue
         try:
             reply = chat_request(port, text)
+            if isinstance(reply, dict) and reply.get("pending"):
+                pending = reply["pending"]
+                print(
+                    "pending: %s %s (type y to confirm, anything else to skip)"
+                    % (pending.get("tool"), pending.get("args"))
+                )
+                try:
+                    answer = safe_text(input("confirm> ")).strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    continue
+                if answer in ("y", "yes"):
+                    confirmed = chat_request(
+                        port, {"message": text, "confirm": True}
+                    )
+                    if isinstance(confirmed, dict):
+                        print(safe_text(confirmed.get("reply") or ""))
+                    else:
+                        print(safe_text(confirmed))
+                continue
             print(safe_text(reply))
         except KeyboardInterrupt:
             print()
@@ -748,15 +782,31 @@ environment:
 
 
 def parse_options(args):
-    opts = {"profile": None, "source": None, "model": None, "venv": False, "risk": None}
+    opts = {
+        "profile": None,
+        "source": None,
+        "model": None,
+        "venv": False,
+        "risk": None,
+        "autonomy": None,
+        "repo": None,
+        "message": None,
+        "branch": None,
+    }
     positional = []
     index = 0
     while index < len(args):
         token = args[index]
-        if token in ("--profile", "--source", "--model", "--risk"):
+        if token in ("--profile", "--source", "--model", "--risk", "--autonomy", "--repo", "--branch"):
             if index + 1 >= len(args):
                 raise CageError("%s requires a value" % token)
             opts[token.lstrip("-")] = args[index + 1]
+            index += 2
+            continue
+        if token == "-m":
+            if index + 1 >= len(args):
+                raise CageError("-m requires a value")
+            opts["message"] = args[index + 1]
             index += 2
             continue
         if token == "--venv":
@@ -828,6 +878,7 @@ def dispatch(command, args):
             positional[0] if positional else None,
             profile=opts["profile"],
             source=opts["source"],
+            autonomy=opts.get("autonomy"),
         )
         return "continue"
     if command == "chat":

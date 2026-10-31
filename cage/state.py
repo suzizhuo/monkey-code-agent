@@ -60,7 +60,7 @@ def _state_path():
 
 
 def _empty_state():
-    return {"version": 1, "current": None, "agents": {}}
+    return {"version": 1, "current": None, "agents": {}, "usage": {}}
 
 
 @contextmanager
@@ -99,7 +99,10 @@ def load_state():
         if not isinstance(name, str) or not isinstance(entry, dict):
             raise CageError("cannot read state file: %s" % path)
         clean[name] = entry
-    return {"version": 1, "current": current, "agents": clean}
+    out = {"version": 1, "current": current, "agents": clean}
+    if isinstance(data.get("usage"), dict):
+        out["usage"] = data.get("usage")
+    return out
 
 
 def save_state(state):
@@ -111,6 +114,8 @@ def save_state(state):
         "current": state.get("current"),
         "agents": state.get("agents") or {},
     }
+    if isinstance(state.get("usage"), dict):
+        payload["usage"] = state.get("usage")
     tmp = Path(str(path) + ".tmp")
     try:
         with open(tmp, "w", encoding="utf-8") as handle:

@@ -20,6 +20,9 @@ CONTEXT_DEFAULT = 900000
 MESSAGE_CHARS_DEFAULT = 900000
 MAX_TURNS_DEFAULT = 400
 HUB_PROBE = "https://registry-1.docker.io/v2/"
+DEFAULT_ACTION_BUDGET = 500
+DEFAULT_WORKER_CONCURRENCY = 3
+DEFAULT_WORKER_MAX_TURNS = 40
 
 
 def _env_int(name, default):
@@ -142,6 +145,43 @@ def resolve_agent_dir(source):
     return str(target)
 
 
+def _env_or(name, default):
+    raw = os.environ.get(name, "").strip()
+    return raw if raw else default
+
+
+def _cage_runtime_env(name, profile, env, cfg, process_install=None):
+    env = env or {}
+    install = cfg.get("install") if process_install is None else process_install
+    values = {
+        "CAGE_AGENT_NAME": name,
+        "CAGE_PROFILE": profile,
+        "CAGE_INSTALL": "1" if install else "0",
+        "CAGE_SOURCE": sanitize_source(env.get("CAGE_SOURCE") or "local"),
+        "CAGE_CONTEXT_TOKENS": str(context_tokens()),
+        "CAGE_CONTEXT_HARD_LIMIT": str(CONTEXT_HARD_LIMIT),
+        "CAGE_MAX_MESSAGE_CHARS": str(max_message_chars()),
+        "CAGE_MAX_TURNS": str(max_turns()),
+        "CAGE_ARCHIVE_MAX": str(_env_int("CAGE_ARCHIVE_MAX", 4000)),
+        "CAGE_AUTONOMY": _env_or("CAGE_AUTONOMY", env.get("CAGE_AUTONOMY") or "auto"),
+        "CAGE_ACTION_BUDGET": _env_or("CAGE_ACTION_BUDGET", str(DEFAULT_ACTION_BUDGET)),
+        "CAGE_CHALLENGE_HOSTS": os.environ.get("CAGE_CHALLENGE_HOSTS", ""),
+        "CAGE_URL_POLICY": _env_or("CAGE_URL_POLICY", "all"),
+        "CAGE_WATCHDOG_SECS": _env_or("CAGE_WATCHDOG_SECS", "0"),
+        "CAGE_WORKER_CONCURRENCY": _env_or(
+            "CAGE_WORKER_CONCURRENCY", str(DEFAULT_WORKER_CONCURRENCY)
+        ),
+        "CAGE_WORKER_MAX_TURNS": _env_or(
+            "CAGE_WORKER_MAX_TURNS", str(DEFAULT_WORKER_MAX_TURNS)
+        ),
+        "CAGE_AGENT_MODE": _env_or("CAGE_AGENT_MODE", env.get("CAGE_AGENT_MODE") or "orchestrator"),
+    }
+    for key in ("CAGE_GH_TOKEN", "CAGE_SSH_KEY_B64", "CAGE_PUBLISH_REPO"):
+        if os.environ.get(key, "").strip() or env.get(key):
+            values[key] = env.get(key) or os.environ.get(key, "")
+    return values
+
+
 def docker_run_args(name, port, profile, env, cfg):
     env = env or {}
     args = [
@@ -210,6 +250,22 @@ def docker_run_args(name, port, profile, env, cfg):
         "-e",
         "MCAI_LLM_API_KEY",
     ]
+    extra = _cage_runtime_env(name, profile, env, cfg)
+    skip = {
+        "CAGE_AGENT_NAME",
+        "CAGE_PROFILE",
+        "CAGE_INSTALL",
+        "CAGE_SOURCE",
+        "CAGE_CONTEXT_TOKENS",
+        "CAGE_CONTEXT_HARD_LIMIT",
+        "CAGE_MAX_MESSAGE_CHARS",
+        "CAGE_MAX_TURNS",
+        "CAGE_ARCHIVE_MAX",
+    }
+    for key, value in extra.items():
+        if key in skip:
+            continue
+        args += ["-e", "%s=%s" % (key, value)]
     model = (env.get("MCAI_LLM_MODEL") or os.environ.get("MCAI_LLM_MODEL") or "").strip()
     if model:
         args += ["-e", "MCAI_LLM_MODEL=" + model]
@@ -227,13 +283,7 @@ def process_spawn_args(name, port, profile, env, cfg):
         merged.update(env)
     merged["CAGE_BIND"] = "127.0.0.1"
     merged["CAGE_PORT"] = str(port)
-    merged["CAGE_AGENT_NAME"] = name
-    merged["CAGE_PROFILE"] = profile
-    merged["CAGE_INSTALL"] = "1" if cfg.get("install") else "0"
-    merged["CAGE_CONTEXT_TOKENS"] = str(context_tokens())
-    merged["CAGE_CONTEXT_HARD_LIMIT"] = str(CONTEXT_HARD_LIMIT)
-    merged["CAGE_MAX_MESSAGE_CHARS"] = str(max_message_chars())
-    merged["CAGE_MAX_TURNS"] = str(max_turns())
+    merged.update(_cage_runtime_env(name, profile, env, cfg))
     server = str(AGENT_DIR / "server.py")
     merged["CAGE_AGENT_SERVER"] = server
     launcher = (
