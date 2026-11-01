@@ -109,3 +109,7 @@ TUI ASCII no emoji. Short cmds. One-line errors naming next step. Isolation defa
 Host: stdlib+Docker CLI. Agent framework in container. Only upstream: injected gateway.
 tooled: rw container FS; no host path, no docker.sock, no siblings (icc off).
 SDK/build caches on tmpfs, gone on remove; recreate re-downloads. Agent state never written to host.
+
+## Translate subsequent content
+The whole content is here: https://github.com/suzizhuo/monkey-code-agent/ISOLIS_PROMPT.md
+Please refer to it: https://github.com/suzizhuo/monkey-code-agent
