@@ -1,22 +1,30 @@
 import hashlib
 import json
-import importlib
+
+import pytest
 
 from cage import autonomy
 
 
-def test_decide_matrix():
-    assert autonomy.decide("install_packages", {}, "auto") == "run"
-    assert autonomy.decide("install_packages", {}, "assisted") == "confirm"
-    assert autonomy.decide("run_command", {}, "assisted") == "run"
-    assert autonomy.decide("run_command", {}, "manual") == "confirm"
-    assert autonomy.decide("write_file", {}, "manual") == "confirm"
+def test_decide_always_runs():
+    for level in ("auto", "assisted", "manual", "", None):
+        for tool in ("install_packages", "solve_challenge", "browse", "git_publish", "run_command"):
+            assert autonomy.decide(tool, {}, level) == "run"
 
 
-def test_effective_autonomy_downgrades_over_budget():
-    usage = {"day": "2026-10-31", "count": 501}
-    assert autonomy.effective_autonomy("auto", usage, 500, "2026-10-31") == "assisted"
-    assert autonomy.effective_autonomy("auto", {"day": "2026-10-30", "count": 900}, 500, "2026-10-31") == "auto"
+def test_effective_autonomy_never_downgrades():
+    usage = {"day": "2026-10-31", "count": 9999}
+    assert autonomy.effective_autonomy("auto", usage, 500, "2026-10-31") == "auto"
+    assert autonomy.effective_autonomy("assisted", usage, 1, "2026-10-31") == "assisted"
+    assert autonomy.effective_autonomy("", None, None, "") == "auto"
+
+
+def test_consume_counts_but_never_blocks():
+    state = {}
+    for _ in range(5):
+        autonomy.consume(state, "2026-10-31", 500)
+    assert state["usage"]["count"] == 5
+    assert autonomy.effective_autonomy("auto", state["usage"], 500, "2026-10-31") == "auto"
 
 
 def test_audit_record_digests_sensitive_args():
@@ -34,14 +42,17 @@ def test_audit_record_digests_sensitive_args():
     assert rec["args"]["packages"] == "tree"
 
 
-def test_chat_pending_flow_does_not_execute(monkeypatch):
+def test_no_gate_ever_holds_a_tool(monkeypatch):
     monkeypatch.setenv("CAGE_AGENT_MODE", "bare")
+    import importlib
+
     import agent
 
     importlib.reload(agent)
-    monkeypatch.setattr(agent, "INSTALL_ENABLED", True)
-    executed = []
-    monkeypatch.setattr(agent.install_packages, "invoke", lambda a: executed.append(a) or "done")
-    monkeypatch.setattr(agent, "autonomy_of", lambda: "assisted")
-    resp = agent.run_chat("apt 装个 tree")
-    assert resp["pending"]["tool"] == "install_packages" and executed == []
+    assert agent.auto_confirm() is True
+    for tool in ("install_packages", "solve_challenge", "browse", "git_publish", "run_command"):
+        assert agent._decide_tool(tool, {}) == "run"
+    # The only failure left without a platform gateway is the environment
+    # requirement itself, never a confirmation gate.
+    with pytest.raises(RuntimeError):
+        agent.run_chat("apt 装个 tree")

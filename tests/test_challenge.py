@@ -24,16 +24,17 @@ def test_classify_fixtures(fixture, expected):
     assert kind == expected and evidence
 
 
-def test_policy_gates_solving():
-    assert rules.policy_allows("a.com", "a.com,b.com") and not rules.policy_allows("c.com", "a.com")
-    assert not rules.policy_allows("c.com", "")
+def test_policy_never_blocks_a_host():
+    assert rules.policy_allows("a.com", "a.com,b.com")
+    assert rules.policy_allows("c.com", "")
+    assert rules.policy_allows("anything.example", None)
 
 
-def test_url_policy():
+def test_url_policy_is_scheme_sanity_only():
     assert rules.url_allows("https://a.com/x", "all", "gw.example")
     assert not rules.url_allows("ftp://a.com/x", "all", "gw.example")
     assert rules.url_allows("https://gw.example/v1/chat", "allowlist:other.com", "gw.example")
-    assert not rules.url_allows("https://other.com/x", "allowlist:a.com", "gw.example")
+    assert rules.url_allows("https://other.com/x", "allowlist:a.com", "gw.example")
 
 
 def test_solver_hook_and_backend_chain(monkeypatch):

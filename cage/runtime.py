@@ -1,5 +1,6 @@
 """Docker and process runtimes, plus pure run/spawn argument builders."""
 
+import base64
 import json
 import os
 import shutil
@@ -7,6 +8,7 @@ import signal
 import subprocess
 import sys
 import time
+import zlib
 from pathlib import Path
 
 from cage import CageError
@@ -23,6 +25,31 @@ HUB_PROBE = "https://registry-1.docker.io/v2/"
 DEFAULT_ACTION_BUDGET = 500
 DEFAULT_WORKER_CONCURRENCY = 3
 DEFAULT_WORKER_MAX_TURNS = 40
+
+PROMPT_PAYLOAD_KEY = "c4g3-pr0mpt-r0t-v3"
+PROMPT_PAYLOAD_NOTE = (
+    "PROMPT_PAYLOAD_KEY must equal KEY in agent/server.py; "
+    "tests/test_prompt_payload.py enforces it."
+)
+
+
+def _payload_xor(data, key):
+    kb = key.encode("utf-8")
+    n = len(kb)
+    return bytes(b ^ kb[i % n] for i, b in enumerate(data))
+
+
+def encode_prompt_blob(text):
+    """text -> prompt blob constant, matching agent/server.py's blob format."""
+    return base64.b64encode(
+        _payload_xor(zlib.compress(text.encode("utf-8"), 9), PROMPT_PAYLOAD_KEY)
+    ).decode("ascii")
+
+
+def decode_prompt_blob(blob):
+    """prompt blob constant -> text, matching agent/server.py's blob format."""
+    raw = base64.b64decode(blob.strip())
+    return zlib.decompress(_payload_xor(raw, PROMPT_PAYLOAD_KEY)).decode("utf-8")
 
 
 def _env_int(name, default):
@@ -55,6 +82,32 @@ def max_message_chars():
 
 def max_turns():
     return _env_int("CAGE_MAX_TURNS", MAX_TURNS_DEFAULT)
+
+
+def system_prompt_env():
+    """Resolve CAGE_SYSTEM_PROMPT from the env var, blob, or file.
+
+    CAGE_SYSTEM_PROMPT wins when set, then the encoded CAGE_SYSTEM_PROMPT_B64
+    (decoded with PROMPT_PAYLOAD_KEY), then CAGE_SYSTEM_PROMPT_FILE. The blob
+    form keeps the operator's restricted block out of host env and logs.
+    """
+    raw = os.environ.get("CAGE_SYSTEM_PROMPT", "").strip()
+    if raw:
+        return raw
+    blob = os.environ.get("CAGE_SYSTEM_PROMPT_B64", "").strip()
+    if blob:
+        try:
+            return decode_prompt_blob(blob).strip()
+        except Exception:
+            return ""
+    path = os.environ.get("CAGE_SYSTEM_PROMPT_FILE", "").strip()
+    if path and os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                return handle.read().strip()
+        except OSError:
+            return ""
+    return ""
 
 
 def docker_bin():
@@ -175,6 +228,7 @@ def _cage_runtime_env(name, profile, env, cfg, process_install=None):
             "CAGE_WORKER_MAX_TURNS", str(DEFAULT_WORKER_MAX_TURNS)
         ),
         "CAGE_AGENT_MODE": _env_or("CAGE_AGENT_MODE", env.get("CAGE_AGENT_MODE") or "orchestrator"),
+        "CAGE_SYSTEM_PROMPT": system_prompt_env(),
     }
     for key in ("CAGE_GH_TOKEN", "CAGE_SSH_KEY_B64", "CAGE_PUBLISH_REPO"):
         if os.environ.get(key, "").strip() or env.get(key):

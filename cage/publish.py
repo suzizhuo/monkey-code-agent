@@ -53,8 +53,7 @@ def git_env(auth):
 
 
 def publish_plan(workdir, repo, message, branch, auth):
-    if not (repo or "").strip():
-        raise CageError("repo is required")
+    repo = (repo or "").strip() or os.environ.get("CAGE_PUBLISH_REPO", "").strip()
     branch = branch or "main"
     message = message or "update"
     remote = remote_for(auth, repo)

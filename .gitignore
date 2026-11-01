@@ -180,3 +180,6 @@
 
 # Cage runtime state
 .cage/
+
+# Prompt pack lives outside source; distributed as a GitHub Release asset only
+prompts/

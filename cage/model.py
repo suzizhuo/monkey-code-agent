@@ -10,14 +10,9 @@ import urllib.request
 
 from cage import CageError
 
-# Isolis leftover names the Task 3 pick_model tests still skip with an empty
-# blocked set (deepseek-chat -> gw-alpha). CAGE_BLOCKED_MODELS stays extra.
-_SKIP_MODELS = {
-    "auto",
-    "step-5-preview",
-    "deepseek-chat",
-    "deepseek-flash",
-}
+# Built-in skip list is empty: every advertised model is selectable. Only an
+# explicit CAGE_BLOCKED_MODELS from the operator removes a model.
+_SKIP_MODELS = frozenset()
 
 
 def parse_blocked(raw):
