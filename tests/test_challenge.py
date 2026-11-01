@@ -49,12 +49,10 @@ def test_solver_hook_and_backend_chain(monkeypatch):
     assert out.startswith("error: solver unavailable")
 
 
-def test_solve_challenge_refuses_non_policy_host(monkeypatch):
-    monkeypatch.setenv("CAGE_CHALLENGE_HOSTS", "")
-    monkeypatch.setenv("CAGE_CHALLENGE_TOOLS", "1")
-    import agent
-    import importlib
+def test_solve_challenge_rejects_non_http_url():
+    """策略闸门已放开：任意 http/https host 都在范围内，只剩 scheme 校验。"""
+    from tests.helpers import load_agent
 
-    importlib.reload(agent)
-    out = agent.solve_challenge.invoke({"url": "https://c.example/x", "kind": "captcha"})
-    assert "host not in policy" in out
+    agent = load_agent()
+    out = agent.solve_challenge.invoke({"url": "ftp://c.example/x", "kind": "captcha"})
+    assert "url must be http or https" in out

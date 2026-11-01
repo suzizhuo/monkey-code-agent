@@ -1,5 +1,3 @@
-import importlib
-
 from cage import workers
 
 
@@ -33,9 +31,13 @@ def test_clamp_worker_result():
 
 def test_delegation_keeps_main_context_bounded(monkeypatch):
     monkeypatch.setenv("CAGE_AGENT_MODE", "orchestrator")
-    import agent
+    # load_agent() 而非 importlib.reload：agent/ 无 __init__.py，裸 import 会拿到
+    # namespace package；且本机 Python 3.14 上 reload 对该模块是空操作（实测 env 改变后不重执行）
+    from tests.helpers import load_agent
 
-    importlib.reload(agent)
+    for key in ("MCAI_LLM_BASE_URL", "MCAI_LLM_API_KEY", "MCAI_LLM_MODEL"):
+        monkeypatch.delenv(key, raising=False)
+    agent = load_agent()
     monkeypatch.setattr(agent, "CAGE_AGENT_MODE", "orchestrator")
     monkeypatch.setattr(agent, "AGENT_MODE", "orchestrator")
 
@@ -63,10 +65,9 @@ def test_delegation_keeps_main_context_bounded(monkeypatch):
 
 def test_orchestrator_is_default_without_env(monkeypatch):
     monkeypatch.delenv("CAGE_AGENT_MODE", raising=False)
-    import agent
+    from tests.helpers import agent_info_via_http, load_agent
 
-    importlib.reload(agent)
-    from tests.helpers import agent_info_via_http
+    agent = load_agent()
 
     info = agent_info_via_http()
     assert info["mode"] == "orchestrator"

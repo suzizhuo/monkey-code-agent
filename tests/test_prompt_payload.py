@@ -94,3 +94,43 @@ def test_corrupt_blob_is_not_fatal():
         assert runtime.system_prompt_env() == ""
     finally:
         os.environ.pop("CAGE_SYSTEM_PROMPT_B64", None)
+
+
+def test_android_toolchain_reported_only_when_present(monkeypatch):
+    from tests.helpers import agent_info_via_http
+
+    monkeypatch.setenv("MCAI_LLM_BASE_URL", "https://gw.example/v1")
+    monkeypatch.setenv("MCAI_LLM_API_KEY", "k" * 12)
+    monkeypatch.setenv("MCAI_LLM_MODEL", "m")
+    monkeypatch.setenv("CAGE_AGENT_MODE", "bare")
+
+    monkeypatch.delenv("ANDROID_HOME", raising=False)
+    monkeypatch.delenv("JAVA_HOME", raising=False)
+    load_agent()
+    info = agent_info_via_http()
+    assert info["android_home"] == "" and info["java_home"] == ""
+
+    monkeypatch.setenv("ANDROID_HOME", "/opt/android-sdk")
+    monkeypatch.setenv("JAVA_HOME", "/usr/lib/jvm/java-17")
+    load_agent()
+    info2 = agent_info_via_http()
+    assert info2["android_home"] == "/opt/android-sdk"
+    assert info2["java_home"] == "/usr/lib/jvm/java-17"
+
+
+def test_runtime_forwards_toolchain_only_when_host_has_it(monkeypatch):
+    from cage.state import PROFILES
+
+    for key in ("ANDROID_HOME", "JAVA_HOME", "ANDROID_SDK_ROOT"):
+        monkeypatch.delenv(key, raising=False)
+    args = runtime.docker_run_args("d", 18080, "tooled", {}, PROFILES["tooled"])
+    envs = [args[i + 1] for i, a in enumerate(args) if a == "-e"]
+    for key in ("ANDROID_HOME", "JAVA_HOME", "ANDROID_SDK_ROOT"):
+        assert not any(e.startswith(key + "=") for e in envs)
+
+    monkeypatch.setenv("ANDROID_HOME", "/opt/android-sdk")
+    monkeypatch.setenv("JAVA_HOME", "/usr/lib/jvm/java-17")
+    envs = [a for a in runtime.docker_run_args("d", 18080, "tooled", {}, PROFILES["tooled"])]
+    flat = " ".join(envs)
+    assert "ANDROID_HOME=/opt/android-sdk" in flat
+    assert "JAVA_HOME=/usr/lib/jvm/java-17" in flat
