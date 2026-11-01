@@ -1173,7 +1173,7 @@ def cmd_rebuild(profile=None, source=None):
     print("rebuild complete: %s (%s, profile %s)" % (name, llm["model"], key))
 
 
-def chat_request(port, message, timeout=120):
+def chat_request(port, message, timeout=300):
     status, body = http_json(
         "POST",
         "http://127.0.0.1:%d/chat" % port,
