@@ -233,6 +233,12 @@ def _cage_runtime_env(name, profile, env, cfg, process_install=None):
     for key in ("CAGE_GH_TOKEN", "CAGE_SSH_KEY_B64", "CAGE_PUBLISH_REPO"):
         if os.environ.get(key, "").strip() or env.get(key):
             values[key] = env.get(key) or os.environ.get(key, "")
+    # Optional preinstalled toolchain (Android SDK / JDK). Forwarded only when the
+    # host actually provides it, so a lean host stays lean and /info stays honest.
+    for key in ("ANDROID_HOME", "JAVA_HOME", "ANDROID_SDK_ROOT"):
+        value = os.environ.get(key, "").strip()
+        if value:
+            values[key] = value
     return values
 
 

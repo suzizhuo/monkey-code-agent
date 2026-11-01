@@ -1,3 +1,4 @@
+import re
 import threading
 
 import pytest
@@ -87,6 +88,9 @@ def test_evict_history_keeps_pairs(monkeypatch):
 
 
 def test_health_info_and_tools_count(monkeypatch):
+    # 宿主可能自带 JDK/Android；隔离后才能断言「未提供时 /info 为空」
+    for key in ("ANDROID_HOME", "JAVA_HOME", "ANDROID_SDK_ROOT"):
+        monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("MCAI_LLM_BASE_URL", "https://gw.example/v1")
     monkeypatch.setenv("MCAI_LLM_API_KEY", "k" * 12)
     monkeypatch.setenv("MCAI_LLM_MODEL", "m")
@@ -99,7 +103,7 @@ def test_health_info_and_tools_count(monkeypatch):
         assert http_get(port, "/health")["ok"] is True
         info = http_get(port, "/info")
         assert info["via"] == "mc-direct" and info["injected"] is True
-        assert "android_home" not in info
+        assert info["android_home"] == "" and info["java_home"] == ""
         assert len(info["tools"]) == 6
         assert info["protocol"] in ("openai", "anthropic")
     finally:
@@ -145,12 +149,26 @@ def test_chat_without_injection_returns_clear_error(monkeypatch):
         srv.shutdown()
 
 
-def test_dockerfile_has_no_android_or_jdk_and_pins_base():
+def test_dockerfile_pins_base_and_guards_android_optin():
+    """Android/JDK/Flutter 预置是可选能力，不再一律禁止。
+
+    真正要守住的是三条：基础镜像仍 pin；任何工具链预置必须由 build ARG 显式
+    开启（默认关闭，瘦身镜像不受影响）；预置内容必须对 `USER nobody` 可读。
+    """
     text = open("agent/Dockerfile", encoding="utf-8").read()
     assert "python:3.12-slim" in text
-    for banned in ("android", "ANDROID_HOME", "openjdk", "JAVA_HOME", "GRADLE"):
-        assert banned not in text
     assert "tiktoken" not in text.lower() or "TIKTOKEN_CACHE_DIR=/tmp" in text
+    lowered = text.lower()
+    if any(w in lowered for w in ("android", "openjdk", "flutter", "gradle")):
+        assert re.search(r"^ARG\s+WITH(_ANDROID|_JDK|_FLUTTER|_TOOLCHAIN)?=", text, re.M), (
+            "preinstalled toolchain must sit behind an opt-in build ARG"
+        )
+        assert "chmod -R a+rX" in text or "a+rX" in text, (
+            "preinstalled toolchain must be world-readable for USER nobody"
+        )
+    else:
+        assert "USER nobody" in text
+        assert "python:3.12-slim" in text
 
 
 def test_requirements_pins_four_packages():

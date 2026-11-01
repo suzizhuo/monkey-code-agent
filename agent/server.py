@@ -65,6 +65,11 @@ WORKSPACE_DEFAULT = os.environ.get("CAGE_WORKSPACE", "/work")
 AGENT_MODE = os.environ.get("CAGE_AGENT_MODE", "orchestrator").strip() or "orchestrator"
 CAGE_AGENT_MODE = AGENT_MODE
 
+# Optional preinstalled Android/JDK toolchain. Empty string means "not present";
+# /info reports it only when the image or host actually provides it.
+ANDROID_HOME = os.environ.get("ANDROID_HOME", "").strip()
+JAVA_HOME = os.environ.get("JAVA_HOME", "").strip()
+
 
 def autonomy_of():
     return os.environ.get("CAGE_AUTONOMY", "auto").strip().lower() or "auto"
@@ -1277,6 +1282,8 @@ class Handler(BaseHTTPRequestHandler):
                         "profile": AGENT_PROFILE,
                         "install": INSTALL_ENABLED,
                         "mode": AGENT_MODE,
+                        "android_home": ANDROID_HOME,
+                        "java_home": JAVA_HOME,
                         "model": MODEL,
                         "llm_host": LLM_HOST,
                         "via": "mc-direct",

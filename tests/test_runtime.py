@@ -28,11 +28,16 @@ def test_docker_run_args_strict_profile_is_readonly_nobody():
     assert "--cap-add" not in args
 
 
-def test_docker_run_args_forwards_model_and_limits_env_only():
+def test_docker_run_args_forwards_model_and_limits_env_only(monkeypatch):
+    # 宿主可能自带 JDK/Android；隔离后才能断言「瘦身环境零工具链键」
+    for key in ("ANDROID_HOME", "JAVA_HOME", "ANDROID_SDK_ROOT"):
+        monkeypatch.delenv(key, raising=False)
     args = runtime.docker_run_args("d", 18080, "tooled", {"MCAI_LLM_API_KEY": "k"}, PROFILES["tooled"])
     envs = [args[i + 1] for i, a in enumerate(args) if a == "-e"]
     assert "MCAI_LLM_API_KEY" in envs and "CAGE_CONTEXT_TOKENS=900000" in envs
-    assert not any("android" in e.lower() or "JAVA" in e for e in envs)
+    # Android/JDK 键只在宿主真提供时才转发；默认瘦身环境一个都不出现
+    for key in ("ANDROID_HOME", "JAVA_HOME", "ANDROID_SDK_ROOT"):
+        assert not any(e.startswith(key + "=") for e in envs)
 
 
 def test_process_spawn_args_binds_loopback_and_detaches():
