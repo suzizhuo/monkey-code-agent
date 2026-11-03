@@ -1,6 +1,0 @@
-.isolis/
-__pycache__/
-*.pyc
-.pytest_cache/
-*.tgz
-.DS_Store
