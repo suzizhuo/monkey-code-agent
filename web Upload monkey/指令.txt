@@ -1,4 +1,7 @@
 1.上传skill
 2.指令：
 
-mv SKILL.md /root/.codingmatrix/project-tpl/.ai-ready/skills
+mkdir /root/.codingmatrix/project-tpl/.ai-ready/skills/publish-website
+mv SKILL.md /root/.codingmatrix/project-tpl/.ai-ready/skills/publish-website
+
+3.sh添加白名单
