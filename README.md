@@ -3,3 +3,5 @@
 执行isolis.py /help
 
 先用 Releases v6.6.6 看README.md
+
+如果你想参加web作品竞赛活动,上传作品，可以看web Upload monkey

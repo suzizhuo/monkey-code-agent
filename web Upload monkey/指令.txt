@@ -1,4 +1,4 @@
 1.上传skill
 2.指令：
 
-mv skill.md /root/.codingmatrix/project-tpl/.ai-ready/skills
+mv SKILL.md /root/.codingmatrix/project-tpl/.ai-ready/skills
