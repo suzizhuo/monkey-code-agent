@@ -1,0 +1,53 @@
+Client:
+ Context:    default
+ Debug Mode: false
+
+Server:
+ Containers: 1
+  Running: 1
+  Paused: 0
+  Stopped: 0
+ Images: 14
+ Server Version: 20.10.24+dfsg1
+ Storage Driver: overlay2
+  Backing Filesystem: extfs
+  Supports d_type: true
+  Native Overlay Diff: true
+  userxattr: false
+ Logging Driver: json-file
+ Cgroup Driver: cgroupfs
+ Cgroup Version: 2
+ Plugins:
+  Volume: local
+  Network: bridge host ipvlan macvlan null overlay
+  Log: awslogs fluentd gcplogs gelf journald json-file local logentries splunk syslog
+ Swarm: inactive
+ Runtimes: io.containerd.runc.v2 io.containerd.runtime.v1.linux runc
+ Default Runtime: runc
+ Init Binary: docker-init
+ containerd version: 1.6.20~ds1-1+deb12u3
+ runc version: 1.1.5+ds1-1+deb12u1
+ init version: 
+ Security Options:
+  seccomp
+   Profile: default
+  cgroupns
+ Kernel Version: 6.6.116
+ Operating System: Debian GNU/Linux 12 (bookworm)
+ OSType: linux
+ Architecture: x86_64
+ CPUs: 2
+ Total Memory: 7.779GiB
+ Name: e5ab54f1-1013-4b88-aaf8-5110cdccee5c
+ ID: XCJD:WJNI:MJJM:S4TN:CSUC:KU2K:FO7P:UXAD:Y5ZM:4CWH:M6JU:HTIG
+ Docker Root Dir: /var/lib/docker
+ Debug Mode: false
+ Registry: https://index.docker.io/v1/
+ Labels:
+ Experimental: false
+ Insecure Registries:
+  127.0.0.0/8
+ Registry Mirrors:
+  https://docker.m.daocloud.io/
+ Live Restore Enabled: false
+

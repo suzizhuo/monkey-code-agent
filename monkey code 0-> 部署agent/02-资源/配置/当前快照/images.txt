@@ -1,0 +1,3 @@
+isolis-agent:strict-c2ba43eb87	7f61f25b2cab	2.23GB	2026-11-06 07:35:54 +0000 UTC
+isolis-agent:tooled-ca22788ffe	7f61f25b2cab	2.23GB	2026-11-06 07:35:54 +0000 UTC
+python:3.12-slim-bookworm	313cf8f190a1	124MB	2026-11-05 08:01:02 +0000 UTC

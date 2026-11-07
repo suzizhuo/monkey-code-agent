@@ -1,0 +1,1 @@
+User=0:0 RO=false CapDrop=[ALL] CapAdd=[CHOWN DAC_OVERRIDE FOWNER SETUID SETGID SETFCAP] Mem=4294967296 NanoCpus=2000000000 Pids=512 Ports=map[8080/tcp:[map[HostIp:127.0.0.1 HostPort:18080]]] Mounts=0 Net=isolis-net

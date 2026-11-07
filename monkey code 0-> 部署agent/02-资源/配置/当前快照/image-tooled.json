@@ -1,0 +1,150 @@
+[
+    {
+        "Id": "sha256:7f61f25b2cabf29529411685b80de60f3af426a9e9c773f89d86c776a4085378",
+        "RepoTags": [
+            "isolis-agent:strict-c2ba43eb87",
+            "isolis-agent:tooled-ca22788ffe"
+        ],
+        "RepoDigests": [],
+        "Parent": "sha256:e29b2fb43194d9ef47908517ce1620debecc19c4d7b7d284b06eb3d8a8d5aac3",
+        "Comment": "",
+        "Created": "2026-11-06T07:35:54.289041097Z",
+        "Container": "ba4000cc232a9f676c48c596b2a3a5e159544b44263055f7fe13b88b2441d5d9",
+        "ContainerConfig": {
+            "Hostname": "ba4000cc232a",
+            "Domainname": "",
+            "User": "",
+            "AttachStdin": false,
+            "AttachStdout": false,
+            "AttachStderr": false,
+            "ExposedPorts": {
+                "8080/tcp": {}
+            },
+            "Tty": false,
+            "OpenStdin": false,
+            "StdinOnce": false,
+            "Env": [
+                "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "LANG=C.UTF-8",
+                "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
+                "PYTHON_VERSION=3.12.16",
+                "PYTHON_SHA256=b5796915dc45ff745cfb4e990a7e7c93d6f546328a102ce31448d69ebc37575c",
+                "PYTHONUNBUFFERED=1",
+                "PYTHONDONTWRITEBYTECODE=1",
+                "PIP_NO_CACHE_DIR=1",
+                "TIKTOKEN_CACHE_DIR=/tmp",
+                "HOME=/tmp",
+                "LC_ALL=C.UTF-8",
+                "PYTHONIOENCODING=utf-8",
+                "PLAYWRIGHT_BROWSERS_PATH=/ms-playwright",
+                "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64",
+                "ANDROID_HOME=/opt/android-sdk",
+                "ANDROID_SDK_ROOT=/opt/android-sdk",
+                "GRADLE_USER_HOME=/work/.gradle",
+                "NPM_CONFIG_CACHE=/work/.npm",
+                "PIP_CACHE_DIR=/work/.pip-cache",
+                "DEBIAN_FRONTEND=noninteractive"
+            ],
+            "Cmd": [
+                "/bin/sh",
+                "-c",
+                "#(nop) ",
+                "CMD [\"python\" \"/app/server.py\"]"
+            ],
+            "Image": "sha256:e29b2fb43194d9ef47908517ce1620debecc19c4d7b7d284b06eb3d8a8d5aac3",
+            "Volumes": null,
+            "WorkingDir": "/app",
+            "Entrypoint": [
+                "/usr/bin/tini",
+                "--"
+            ],
+            "OnBuild": null,
+            "Labels": {}
+        },
+        "DockerVersion": "20.10.24+dfsg1",
+        "Author": "",
+        "Config": {
+            "Hostname": "",
+            "Domainname": "",
+            "User": "",
+            "AttachStdin": false,
+            "AttachStdout": false,
+            "AttachStderr": false,
+            "ExposedPorts": {
+                "8080/tcp": {}
+            },
+            "Tty": false,
+            "OpenStdin": false,
+            "StdinOnce": false,
+            "Env": [
+                "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "LANG=C.UTF-8",
+                "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
+                "PYTHON_VERSION=3.12.16",
+                "PYTHON_SHA256=b5796915dc45ff745cfb4e990a7e7c93d6f546328a102ce31448d69ebc37575c",
+                "PYTHONUNBUFFERED=1",
+                "PYTHONDONTWRITEBYTECODE=1",
+                "PIP_NO_CACHE_DIR=1",
+                "TIKTOKEN_CACHE_DIR=/tmp",
+                "HOME=/tmp",
+                "LC_ALL=C.UTF-8",
+                "PYTHONIOENCODING=utf-8",
+                "PLAYWRIGHT_BROWSERS_PATH=/ms-playwright",
+                "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64",
+                "ANDROID_HOME=/opt/android-sdk",
+                "ANDROID_SDK_ROOT=/opt/android-sdk",
+                "GRADLE_USER_HOME=/work/.gradle",
+                "NPM_CONFIG_CACHE=/work/.npm",
+                "PIP_CACHE_DIR=/work/.pip-cache",
+                "DEBIAN_FRONTEND=noninteractive"
+            ],
+            "Cmd": [
+                "python",
+                "/app/server.py"
+            ],
+            "Image": "sha256:e29b2fb43194d9ef47908517ce1620debecc19c4d7b7d284b06eb3d8a8d5aac3",
+            "Volumes": null,
+            "WorkingDir": "/app",
+            "Entrypoint": [
+                "/usr/bin/tini",
+                "--"
+            ],
+            "OnBuild": null,
+            "Labels": null
+        },
+        "Architecture": "amd64",
+        "Os": "linux",
+        "Size": 2229743266,
+        "VirtualSize": 2229743266,
+        "GraphDriver": {
+            "Data": {
+                "LowerDir": "/var/lib/docker/overlay2/9553709d7c3dc24a4ebd27e1837d0f1bbc977dd5d27bef019f0c078fa0ad8670/diff:/var/lib/docker/overlay2/da1f4e5cea777a5d9c022996e8ae7fb7577d9d7ba6af04cafc545e3bf1d90cb9/diff:/var/lib/docker/overlay2/55164acc907a99660dd692280bef6c8f963b3513f9aea2730729f38e3afef4e0/diff:/var/lib/docker/overlay2/5c3be18790d97a37de60c352a0cab6c6e2c328da0e034dc954d6f723031f9e29/diff:/var/lib/docker/overlay2/30538b1a7c831a7b0fb409ac1554d45bffa01bdb553cab0a1d2da2ae0c4e5b47/diff:/var/lib/docker/overlay2/37667322481d272270b345a4c78b1b3a64259f8f41081db99dccbd61f636afb4/diff:/var/lib/docker/overlay2/31a50d0e6920031d6d892c872f42067f1b4a906b8308def81af25faa0b38754e/diff:/var/lib/docker/overlay2/c97da494f86a51a695e2fc1844f6e57f7cee47ea084ea44dd1e458b583b0f423/diff:/var/lib/docker/overlay2/e0a8a5154e8494d9f635eebf5a457181910150753a1da198008caeb9d5bf7269/diff:/var/lib/docker/overlay2/6bc9953f47bd741515041f739672a1d73d9f53135e9973f4f417ddfe4340387a/diff:/var/lib/docker/overlay2/e51ac4d2287670a6545532c462b2644ba3e4ca84384d59ba15b4356ce565bcc5/diff:/var/lib/docker/overlay2/7ef88b56a68ca05af2b09526055fb784efadd2dd8042869cb2d53b5554b0c846/diff",
+                "MergedDir": "/var/lib/docker/overlay2/62e4cb702117bfd626c0c2e1b7d9d13fffe35b25ac00870692e5f39c2e47dc30/merged",
+                "UpperDir": "/var/lib/docker/overlay2/62e4cb702117bfd626c0c2e1b7d9d13fffe35b25ac00870692e5f39c2e47dc30/diff",
+                "WorkDir": "/var/lib/docker/overlay2/62e4cb702117bfd626c0c2e1b7d9d13fffe35b25ac00870692e5f39c2e47dc30/work"
+            },
+            "Name": "overlay2"
+        },
+        "RootFS": {
+            "Type": "layers",
+            "Layers": [
+                "sha256:1d7b9dd8778ebc4d9bf2f64436dd358640718cb349f5640b33bebaea4ffd62c2",
+                "sha256:a3cfe73133965fb536427fde3fe66b2949ea6178f568733760bf45f5c8b5c405",
+                "sha256:5e63f01f0cee6291b52c44ffeee48c9eb7b94cdb19478259bcfce37db9eb680e",
+                "sha256:311a92d269bd002ca4ff3d801c6320df734027d3b425ff1ec860368f12b07a26",
+                "sha256:26ea4d5d37a861a6966f85a28b8303947ca41bf5e194b803534dbd15004587c6",
+                "sha256:e2ff7bace073075e035b6d47cdba6d1fa24e0f41d6498257f0b43f6c28b851b2",
+                "sha256:570d0188677dbdf58a49d8d6a5f09839ae4213df17d00b399d164254257e2707",
+                "sha256:84edca2a2f8972bfa6457c32b95bf8759236f2c1a936b1b97f6db2e6e5245369",
+                "sha256:b843aa097c570a1ea0d0cec1b01957193e2d740c0a6116b835ea3eac0b3b0bd6",
+                "sha256:d9aa4ec0280f2a4d67396478a96e768e4142dc343956d09691e15883e0fb11a5",
+                "sha256:a7591b1bc378a96c0c20ad14f1c1809f9ffff1e1307da29b0c9cfb9f81396600",
+                "sha256:63151f4bf79b3e2d4f919312d99910f3644d515fd177a7071d2825b8ebc3547a",
+                "sha256:ce102ab4a5ae1308d41bb490ce2d5a781bbe10a849c5e296b4bd8af6c36d98ff"
+            ]
+        },
+        "Metadata": {
+            "LastTagTime": "2026-11-06T07:39:30.63920668Z"
+        }
+    }
+]

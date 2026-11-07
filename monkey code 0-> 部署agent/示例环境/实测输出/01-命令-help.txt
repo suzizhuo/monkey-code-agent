@@ -1,0 +1,22 @@
+isolis commands:
+  setup         prepare Docker, mirror, image and network
+  doctor        check environment and report problems
+  init [name]   build and start an isolated agent
+  chat          chat with the current agent
+  use <name>    switch the current agent
+  status        list agents and isolation summary
+  rebuild       rebuild the image and current agent
+  stop [name]   remove an agent container
+  profiles      list capability profiles
+  help          show this help
+  quit/exit     leave isolis
+
+options (init, setup, rebuild):
+  --profile strict|tooled   sandbox capability level (default tooled)
+  --source <local|git-url>  agent source (default local)
+  --model <name>            override the injected model
+
+environment:
+  ISOLIS_PROFILE, ISOLIS_AGENT_SOURCE, ISOLIS_MODEL, ISOLIS_DEFAULT_MODEL
+  ISOLIS_CONTEXT_TOKENS    token budget before memory compression (0 = off)
+  ISOLIS_MAX_MESSAGE_CHARS per-message character cap

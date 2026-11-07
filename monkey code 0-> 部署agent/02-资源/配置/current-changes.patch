@@ -1,0 +1,1308 @@
+diff --git a/.monkeycode/MEMORY.md b/.monkeycode/MEMORY.md
+index 0793a23..504321e 100644
+--- a/.monkeycode/MEMORY.md
++++ b/.monkeycode/MEMORY.md
+@@ -69,3 +69,14 @@ Entries discovered by the Agent during task execution should follow this format:
+   - This workspace needed `apt-get install -y docker.io`. dockerd runs overlay2. Docker Hub was unreachable; `/etc/docker/daemon.json` uses registry-mirrors `https://docker.m.daocloud.io`.
+   - `python3 -m pytest` was missing in this session; Isolis HTTP checks used stdlib only.
+   - Current git HEAD in this workspace was `775f873` Initial commit at 2026-11-01 08:55:27 UTC.
++
++[Isolis local environment 2026-11-06]
++- Date: 2026-11-06
++- Context: Discovered by Agent while making `python3 isolis.py init` work in this workspace
++- Category: Environment Configuration
++- Instructions:
++  - Docker engine installed via `apt-get install -y docker.io` (20.10.24); daemon started manually with `dockerd --host=unix:///var/run/docker.sock --storage-driver=overlay2 --iptables=true`. Run it as a background terminal, not `&`.
++  - Docker Hub is unreachable; `/etc/docker/daemon.json` uses `registry-mirrors: ["https://docker.m.daocloud.io"]`.
++  - Both profile images (`isolis-agent:tooled-*`, `isolis-agent:strict-*`) are 2.23GB and build from the same Dockerfile, so building one warms the cache for the other.
++  - The `MCP shell` has no `MCAI_LLM_*` vars; the platform injects them only into the user's TUI session. Host-side `detect_llm()` therefore fails in agent shell, by design.
++  - `openssh-client` must be present for `tests/test_publish.py`; install with `apt-get install -y openssh-client`.
+diff --git a/agent/Dockerfile b/agent/Dockerfile
+index b42464c..bc43b61 100644
+--- a/agent/Dockerfile
++++ b/agent/Dockerfile
+@@ -9,13 +9,20 @@ ENV PYTHONUNBUFFERED=1 \
+     LC_ALL=C.UTF-8 \
+     PYTHONIOENCODING=utf-8 \
+     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+-    CAGE_WORKSPACE=/work \
++    JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64 \
++    ANDROID_HOME=/opt/android-sdk \
++    ANDROID_SDK_ROOT=/opt/android-sdk \
++    GRADLE_USER_HOME=/work/.gradle \
+     NPM_CONFIG_CACHE=/work/.npm \
+     PIP_CACHE_DIR=/work/.pip-cache \
+     DEBIAN_FRONTEND=noninteractive
+ 
+ RUN apt-get update \
+     && apt-get install -y --no-install-recommends \
++        openjdk-17-jdk-headless \
++        build-essential \
++        pkg-config \
++        cmake \
+         git \
+         ca-certificates \
+         curl \
+@@ -37,9 +44,6 @@ RUN apt-get update \
+         openssh-client \
+         gnupg \
+         tini \
+-        build-essential \
+-        pkg-config \
+-        cmake \
+         nodejs \
+         npm \
+     && rm -rf /var/lib/apt/lists/*
+@@ -53,15 +57,17 @@ RUN python -m playwright install --with-deps chromium \
+     && rm -rf /var/lib/apt/lists/* \
+     && chmod -R a+rX /ms-playwright
+ 
+-RUN git config --system --add safe.directory /work \
+-    && git config --system user.name "Cage Agent" \
+-    && git config --system user.email "agent@cage.local"
++RUN mkdir -p /opt/android-sdk \
++    && git config --system --add safe.directory /work \
++    && git config --system user.name "Isolis Agent" \
++    && git config --system user.email "agent@isolis.local" \
++    && chmod -R a+rwX /opt/android-sdk
+ 
+ COPY server.py /app/server.py
++COPY install-android-sdk.sh /app/install-android-sdk.sh
++RUN chmod +x /app/install-android-sdk.sh
+ 
+ EXPOSE 8080
+ 
+-USER nobody
+-
+ ENTRYPOINT ["/usr/bin/tini", "--"]
+ CMD ["python", "/app/server.py"]
+diff --git a/agent/server.py b/agent/server.py
+index 2c18bf6..166c4b6 100644
+--- a/agent/server.py
++++ b/agent/server.py
+@@ -1382,17 +1382,65 @@ class Handler(BaseHTTPRequestHandler):
+ 
+ ISOLIS_HISTORY = []
+ ISOLIS_HISTORY_LOCK = threading.Lock()
+-ISOLIS_MAX_TURNS = 24
++ISOLIS_ARCHIVE = []
++ISOLIS_ARCHIVE_LOCK = threading.Lock()
++ISOLIS_COMPRESSED_TURNS = 0
+ ISOLIS_LLM = None
+ ISOLIS_LLM_LOCK = threading.Lock()
+-ISOLIS_SOURCE = "https://github.com/langchain-ai/langchain"
++ISOLIS_PROTOCOL = None
++ISOLIS_PROTOCOL_LOCK = threading.Lock()
++ISOLIS_SOURCE = os.environ.get("ISOLIS_SOURCE", "local").strip() or "local"
+ ISOLIS_DEFAULT_MODEL = "monkeycode-pro/gpt-5.6-terra"
+-ISOLIS_SYSTEM_PROMPT = (
+-    "You are Isolis, an assistant inside an isolated Docker container built "
+-    "with LangChain. You cannot see the host filesystem, other agent "
+-    "containers, or the Docker socket. Match the user's language. Be concise "
+-    "and factual."
+-)
++ISOLIS_COMPRESS_MARKER = "[compressed history]"
++
++
++def _isolis_named_tool(name):
++    def decorator(func):
++        if HAS_LANGCHAIN:
++            return tool(name)(func)
++        wrapped = tool(func)
++        wrapped.name = name
++        return wrapped
++    return decorator
++
++
++def _isolis_int(name, default):
++    raw = os.environ.get(name, "").strip()
++    if not raw:
++        return default
++    try:
++        value = int(raw)
++    except ValueError:
++        return default
++    return value if value >= 0 else default
++
++
++ISOLIS_MAX_TURNS = _isolis_int("ISOLIS_MAX_TURNS", 400)
++ISOLIS_MAX_TOOL_STEPS = _isolis_int("ISOLIS_MAX_TOOL_STEPS", 8)
++ISOLIS_SHELL_TIMEOUT = _isolis_int("ISOLIS_SHELL_TIMEOUT", 120)
++ISOLIS_INSTALL_TIMEOUT = _isolis_int("ISOLIS_INSTALL_TIMEOUT", 1800)
++ISOLIS_MAX_OUTPUT = _isolis_int("ISOLIS_MAX_OUTPUT", 20000)
++ISOLIS_CONTEXT_HARD_LIMIT = _isolis_int("ISOLIS_CONTEXT_HARD_LIMIT", 1000000)
++ISOLIS_MAX_MESSAGE_CHARS = _isolis_int("ISOLIS_MAX_MESSAGE_CHARS", 900000)
++ISOLIS_COMPRESS_BATCH = _isolis_int("ISOLIS_COMPRESS_BATCH", 40)
++ISOLIS_SUMMARY_MAX_CHARS = _isolis_int("ISOLIS_SUMMARY_MAX_CHARS", 8000)
++ISOLIS_SUMMARY_INPUT_CHARS = _isolis_int("ISOLIS_SUMMARY_INPUT_CHARS", 60000)
++ISOLIS_ARCHIVE_MAX = _isolis_int("ISOLIS_ARCHIVE_MAX", 4000)
++ISOLIS_WORKSPACE = "/work"
++ISOLIS_ANDROID_HOME = os.environ.get("ANDROID_HOME", "/opt/android-sdk").strip() or "/opt/android-sdk"
++ISOLIS_PROFILE = os.environ.get("ISOLIS_PROFILE", "tooled").strip() or "tooled"
++_install_raw = os.environ.get("ISOLIS_INSTALL", "1").strip().lower()
++ISOLIS_INSTALL = _install_raw not in ("0", "false", "no", "off")
++
++ISOLIS_CONTEXT_TOKENS = _isolis_int("ISOLIS_CONTEXT_TOKENS", 900000)
++if ISOLIS_CONTEXT_TOKENS > ISOLIS_CONTEXT_HARD_LIMIT:
++    sys.stderr.write(
++        "isolis-agent: ISOLIS_CONTEXT_TOKENS %d exceeds the upstream limit %d; "
++        "clamping\n" % (ISOLIS_CONTEXT_TOKENS, ISOLIS_CONTEXT_HARD_LIMIT)
++    )
++    ISOLIS_CONTEXT_TOKENS = ISOLIS_CONTEXT_HARD_LIMIT
++
++os.environ.setdefault("TIKTOKEN_CACHE_DIR", "/tmp")
+ 
+ 
+ def isolis_agent_name():
+@@ -1409,66 +1457,632 @@ def isolis_fields():
+ 
+ 
+ def isolis_model_name():
+-    return os.environ.get("MCAI_LLM_MODEL", "").strip() or ISOLIS_DEFAULT_MODEL
++    return (
++        os.environ.get("ISOLIS_MODEL", "").strip()
++        or os.environ.get("MCAI_LLM_MODEL", "").strip()
++        or ISOLIS_DEFAULT_MODEL
++    )
++
++
++def isolis_llm_host():
++    base = os.environ.get("MCAI_LLM_BASE_URL", "").strip()
++    return urlparse(base).netloc if base else ""
++
++
++def isolis_injected():
++    base = os.environ.get("MCAI_LLM_BASE_URL", "").strip()
++    key = os.environ.get("MCAI_LLM_API_KEY", "").strip()
++    return bool(base and key)
++
++
++def isolis_system_prompt():
++    custom = os.environ.get("ISOLIS_SYSTEM_PROMPT", "").strip()
++    if custom:
++        return custom
++    lines = [
++        "You are Isolis, a coding agent running inside an isolated Docker "
++        "container. You cannot see the host filesystem, sibling agent "
++        "containers, or the Docker socket.",
++        "Your workspace is /work. Keep project files there.",
++        "Match the user's language. Be concise and factual. Verify claims by "
++        "running commands before reporting success.",
++    ]
++    if ISOLIS_INSTALL:
++        lines.append(
++            "Profile '%s': install_packages (apt, pip, npm) and "
++            "install_android_sdk are available." % ISOLIS_PROFILE
++        )
++    else:
++        lines.append(
++            "Profile '%s': package installation is disabled. "
++            "Work with what the image already provides." % ISOLIS_PROFILE
++        )
++    return " ".join(lines)
++
++
++def isolis_count_tokens(text):
++    if not text:
++        return 0
++    if ENCODER is not None:
++        try:
++            return len(ENCODER.encode(safe_text(text), disallowed_special=()))
++        except Exception:
++            pass
++    return max(1, len(safe_text(text)) // 4)
++
++
++def isolis_history_tokens(history):
++    return sum(isolis_count_tokens(turn.get("content", "")) for turn in history)
++
++
++def isolis_truncate(text, cap):
++    text = safe_text(text)
++    if cap <= 0 or len(text) <= cap:
++        return text, False
++    keep = max(2, cap - 120)
++    head = keep // 2
++    tail = keep - head
++    note = "\n...[truncated %d chars]...\n" % (len(text) - keep)
++    return text[:head] + note + text[-tail:], True
++
++
++def isolis_truncate_output(text):
++    text = safe_text(text)
++    if len(text) <= ISOLIS_MAX_OUTPUT:
++        return text
++    return text[:ISOLIS_MAX_OUTPUT] + "\n...[truncated %d chars]" % (
++        len(text) - ISOLIS_MAX_OUTPUT
++    )
++
++
++def _isolis_workspace_path(rel):
++    root = ISOLIS_WORKSPACE
++    target = os.path.realpath(os.path.join(root, rel or "."))
++    base = os.path.realpath(root)
++    if target != base and not target.startswith(base + os.sep):
++        raise ValueError("path escapes the workspace: %s" % rel)
++    return target
+ 
+ 
+-def isolis_require_injected():
++def _isolis_probe(url, body, timeout=6):
++    key = os.environ.get("MCAI_LLM_API_KEY", "").strip()
++    data = json.dumps(json_sanitize(body), ensure_ascii=False).encode("utf-8")
++    request = urllib.request.Request(url, data=data, method="POST")
++    request.add_header("Authorization", "Bearer " + key)
++    request.add_header("Content-Type", "application/json")
++    request.add_header("anthropic-version", "2023-06-01")
++    try:
++        with urllib.request.urlopen(request, timeout=timeout) as response:
++            response.read(400)
++            return response.status
++    except urllib.error.HTTPError as exc:
++        return exc.code
++    except Exception:
++        return None
++
++
++def isolis_detect_protocol():
++    global ISOLIS_PROTOCOL
++    with ISOLIS_PROTOCOL_LOCK:
++        if ISOLIS_PROTOCOL is not None:
++            return ISOLIS_PROTOCOL
++        base = os.environ.get("MCAI_LLM_BASE_URL", "").strip().rstrip("/")
++        host = (urlparse(base).hostname or "").lower()
++        if host.endswith(".example") or host.endswith(".example.com") or host in (
++            "example",
++            "example.com",
++            "example.invalid",
++        ):
++            ISOLIS_PROTOCOL = "openai"
++            return ISOLIS_PROTOCOL
++        body = {
++            "model": isolis_model_name(),
++            "max_tokens": 1,
++            "messages": [{"role": "user", "content": "ping"}],
++        }
++        status = _isolis_probe(base + "/chat/completions", body)
++        ISOLIS_PROTOCOL = "anthropic" if status in (404, 405) else "openai"
++        return ISOLIS_PROTOCOL
++
++
++def isolis_anthropic_base():
++    base = os.environ.get("MCAI_LLM_BASE_URL", "").strip().rstrip("/")
++    if base.endswith("/v1"):
++        base = base[:-3]
++    return base
++
++
++def isolis_build_llm():
++    if not HAS_LANGCHAIN:
++        raise RuntimeError("langchain is not installed")
+     base = os.environ.get("MCAI_LLM_BASE_URL", "").strip()
+     key = os.environ.get("MCAI_LLM_API_KEY", "").strip()
+     if not base or not key:
+-        sys.stderr.write(
+-            "isolis-agent: MonkeyCode LLM was not injected; "
+-            "MCAI_LLM_BASE_URL and MCAI_LLM_API_KEY are required\n"
++        raise RuntimeError(
++            "LLM not injected: MCAI_LLM_BASE_URL and MCAI_LLM_API_KEY are required"
+         )
+-        sys.exit(1)
+-    return base, key
++    if isolis_detect_protocol() == "anthropic":
++        from langchain_anthropic import ChatAnthropic
++
++        return ChatAnthropic(
++            base_url=isolis_anthropic_base(),
++            api_key=key,
++            model=isolis_model_name(),
++            timeout=60,
++            max_retries=1,
++            temperature=0.4,
++            max_tokens=4096,
++        )
++    return ChatOpenAI(
++        base_url=base,
++        api_key=key,
++        model=isolis_model_name(),
++        timeout=60,
++        max_retries=1,
++        temperature=0.4,
++    )
+ 
+ 
+ def isolis_get_llm():
+     global ISOLIS_LLM
+     with ISOLIS_LLM_LOCK:
+         if ISOLIS_LLM is None:
+-            if not HAS_LANGCHAIN:
+-                raise RuntimeError("langchain is not installed")
+-            base, key = isolis_require_injected()
+-            os.environ.setdefault("TIKTOKEN_CACHE_DIR", "/tmp")
+-            ISOLIS_LLM = ChatOpenAI(
+-                model=isolis_model_name(),
+-                api_key=key,
+-                base_url=base,
+-                timeout=60,
+-                max_retries=1,
+-                temperature=0.4,
+-            )
++            ISOLIS_LLM = isolis_build_llm()
+         return ISOLIS_LLM
+ 
+ 
+-def isolis_history_turns():
+-    with ISOLIS_HISTORY_LOCK:
+-        return len(ISOLIS_HISTORY)
++def isolis_reset_llm():
++    global ISOLIS_LLM
++    with ISOLIS_LLM_LOCK:
++        ISOLIS_LLM = None
++
++
++def isolis_flip_protocol():
++    global ISOLIS_PROTOCOL
++    with ISOLIS_PROTOCOL_LOCK:
++        ISOLIS_PROTOCOL = "anthropic" if ISOLIS_PROTOCOL != "anthropic" else "openai"
++    isolis_reset_llm()
++
++
++def isolis_describe_error(err):
++    text = safe_text(str(err)).replace("\n", " ").strip() or type(err).__name__
++    status = error_status(err)
++    if status == 401:
++        return "upstream HTTP 401: injected credentials were rejected"
++    if status == 403 or text.lower() == "forbidden":
++        return "upstream HTTP 403: the gateway rejected this request"
++    if len(text) > 400:
++        text = text[:400] + "..."
++    return text
++
++
++def _isolis_run_shell(command, timeout):
++    try:
++        proc = subprocess.run(
++            ["/bin/sh", "-c", command],
++            cwd=ISOLIS_WORKSPACE,
++            capture_output=True,
++            encoding="utf-8",
++            errors="replace",
++            timeout=timeout,
++        )
++    except subprocess.TimeoutExpired:
++        return "error: command timed out after %ds" % timeout
++    except OSError as exc:
++        return "error: %s" % exc
++    parts = []
++    if proc.stdout:
++        parts.append(proc.stdout)
++    if proc.stderr:
++        parts.append("[stderr] " + proc.stderr)
++    parts.append("[exit %d]" % proc.returncode)
++    return "\n".join(parts)
++
++
++@_isolis_named_tool("run_command")
++def isolis_run_command(cmd: str) -> str:
++    """Run a non-interactive shell command inside the sandbox with cwd /work."""
++    if not isinstance(cmd, str) or not cmd.strip():
++        return "error: empty command"
++    return isolis_truncate_output(_isolis_run_shell(cmd, ISOLIS_SHELL_TIMEOUT))
++
++
++@_isolis_named_tool("write_file")
++def isolis_write_file(path: str, content: str) -> str:
++    """Write text to a file inside /work, creating parent directories."""
++    try:
++        target = _isolis_workspace_path(path)
++    except ValueError as exc:
++        return "error: %s" % exc
++    try:
++        parent = os.path.dirname(target)
++        if parent:
++            os.makedirs(parent, exist_ok=True)
++        with open(target, "w", encoding="utf-8") as handle:
++            handle.write(safe_text(content))
++    except OSError as exc:
++        return "error: %s" % exc
++    return "wrote %d chars to %s" % (len(content), os.path.relpath(target, ISOLIS_WORKSPACE))
++
++
++@_isolis_named_tool("read_file")
++def isolis_read_file(path: str) -> str:
++    """Read a text file inside /work."""
++    try:
++        target = _isolis_workspace_path(path)
++    except ValueError as exc:
++        return "error: %s" % exc
++    try:
++        with open(target, "r", encoding="utf-8", errors="replace") as handle:
++            return isolis_truncate_output(handle.read())
++    except OSError as exc:
++        return "error: %s" % exc
++
++
++@_isolis_named_tool("list_files")
++def isolis_list_files(path: str = ".") -> str:
++    """List files and directories inside /work."""
++    try:
++        target = _isolis_workspace_path(path)
++    except ValueError as exc:
++        return "error: %s" % exc
++    if not os.path.isdir(target):
++        return "error: not a directory: %s" % path
++    lines = []
++    for entry in sorted(os.listdir(target)):
++        full = os.path.join(target, entry)
++        lines.append(entry + ("/" if os.path.isdir(full) else ""))
++    return isolis_truncate_output("\n".join(lines) or "(empty)")
++
++
++@_isolis_named_tool("browse")
++def isolis_browse(url: str, screenshot: bool = False) -> str:
++    """Open a URL in headless Chromium and return the title and visible text."""
++    try:
++        from playwright.sync_api import sync_playwright
++    except ImportError as exc:
++        return "error: playwright is unavailable: %s" % exc
++    if not isinstance(url, str) or not url.strip():
++        return "error: url is empty"
++    url = url.strip()
++    if not re.match(r"^https?://", url):
++        return "error: url must be http(s)"
++    try:
++        with sync_playwright() as pw:
++            browser = pw.chromium.launch(
++                headless=True,
++                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
++            )
++            try:
++                page = browser.new_page()
++                page.goto(url, wait_until="domcontentloaded", timeout=45000)
++                title = page.title()
++                text = page.inner_text("body", timeout=15000)
++                result = "title: %s\nurl: %s\ntext:\n%s" % (title, page.url, text)
++                if screenshot:
++                    name = "shot-%d.png" % int(time.time() * 1000)
++                    out = _isolis_workspace_path(name)
++                    page.screenshot(path=out, full_page=True)
++                    result += "\nscreenshot: %s" % os.path.relpath(out, ISOLIS_WORKSPACE)
++                return isolis_truncate_output(result)
++            finally:
++                browser.close()
++    except Exception as exc:
++        return "error: browse failed: %s" % exc
++
++
++@_isolis_named_tool("install_packages")
++def isolis_install_packages(manager: str, packages: str) -> str:
++    """Install development packages. manager is one of apt, pip, npm."""
++    if not ISOLIS_INSTALL:
++        return "error: package installation is disabled in the strict profile"
++    if not isinstance(manager, str) or manager not in ("apt", "pip", "npm"):
++        return "error: manager must be one of apt, pip, npm"
++    names = " ".join((packages or "").split())
++    if not names:
++        return "error: empty package list"
++    if manager == "apt":
++        command = (
++            "apt-get update -qq && "
++            "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "
++            "--no-install-recommends " + names
++        )
++    elif manager == "pip":
++        command = "python -m pip install --no-cache-dir " + names
++    else:
++        command = "npm install -g " + names
++    return isolis_truncate_output(_isolis_run_shell(command, ISOLIS_INSTALL_TIMEOUT))
++
++
++def _isolis_android_installer():
++    here = os.path.dirname(os.path.abspath(__file__))
++    local = os.path.join(here, "install-android-sdk.sh")
++    if os.path.isfile(local):
++        return local
++    return "/app/install-android-sdk.sh"
++
++
++@_isolis_named_tool("install_android_sdk")
++def isolis_install_android_sdk(packages: str = "") -> str:
++    """Install the Android command-line tools and packages under ANDROID_HOME."""
++    if not ISOLIS_INSTALL:
++        return "error: package installation is disabled in the strict profile"
++    names = " ".join((packages or "").split())
++    prefix = "ANDROID_PACKAGES='%s' " % names if names else ""
++    command = prefix + "sh %s" % _isolis_android_installer()
++    return isolis_truncate_output(_isolis_run_shell(command, ISOLIS_INSTALL_TIMEOUT))
++
++
++
++ISOLIS_BASELINE_TOOLS = [
++    isolis_run_command,
++    isolis_write_file,
++    isolis_read_file,
++    isolis_list_files,
++    isolis_browse,
++]
++ISOLIS_TOOLS = list(ISOLIS_BASELINE_TOOLS)
++if ISOLIS_INSTALL:
++    ISOLIS_TOOLS += [isolis_install_packages, isolis_install_android_sdk]
++
++
++def isolis_tool_names():
++    return [getattr(item, "name", getattr(item, "__name__", "")) for item in ISOLIS_TOOLS]
++
++
++def isolis_archive_turns(turns, reason):
++    if not turns:
++        return
++    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
++    with ISOLIS_ARCHIVE_LOCK:
++        for turn in turns:
++            ISOLIS_ARCHIVE.append(
++                {
++                    "role": turn.get("role", ""),
++                    "content": turn.get("content", ""),
++                    "reason": reason,
++                    "at": stamp,
++                }
++            )
++        if len(ISOLIS_ARCHIVE) > ISOLIS_ARCHIVE_MAX:
++            del ISOLIS_ARCHIVE[: len(ISOLIS_ARCHIVE) - ISOLIS_ARCHIVE_MAX]
++
++
++def isolis_archive_len():
++    with ISOLIS_ARCHIVE_LOCK:
++        return len(ISOLIS_ARCHIVE)
++
++
++def isolis_load_archive():
++    with ISOLIS_ARCHIVE_LOCK:
++        return [dict(entry) for entry in ISOLIS_ARCHIVE]
++
++
++def _isolis_marker(turn):
++    return str(turn.get("content", "")).startswith(ISOLIS_COMPRESS_MARKER)
++
++
++def _isolis_user_count(history):
++    return sum(1 for turn in history if turn.get("role") == "user")
++
++
++def isolis_evict(history):
++    removed = 0
++    while _isolis_user_count(history) > ISOLIS_MAX_TURNS:
++        index = 1 if history and _isolis_marker(history[0]) else 0
++        if index >= len(history):
++            break
++        pair = [history.pop(index)]
++        if index < len(history) and history[index].get("role") != "user":
++            pair.append(history.pop(index))
++        isolis_archive_turns(pair, "evicted")
++        removed += 1
++    return removed
++
++
++def _isolis_summary_input(turns):
++    lines = []
++    budget = ISOLIS_SUMMARY_INPUT_CHARS
++    for turn in turns:
++        content = (turn.get("content") or "").strip()
++        if not content:
++            continue
++        if len(content) > 2000:
++            content = content[:2000] + "...[cut]"
++        block = "%s: %s" % ("user" if turn.get("role") == "user" else "assistant", content)
++        if budget - len(block) < 0:
++            lines.append("...[earlier turns omitted]...")
++            break
++        lines.append(block)
++        budget -= len(block)
++    return "\n\n".join(lines)
++
++
++def _isolis_local_summary(turns, prior=""):
++    text = "\n".join(
++        "%s: %s" % (turn.get("role", "user"), (turn.get("content") or "").strip())
++        for turn in turns
++        if (turn.get("content") or "").strip()
++    )
++    if prior:
++        text = prior + "\n" + text
++    if len(text) > ISOLIS_SUMMARY_MAX_CHARS:
++        text = text[:ISOLIS_SUMMARY_MAX_CHARS] + "\n...[summary cut]..."
++    return text
++
++
++def isolis_summarize(turns, prior=""):
++    body = _isolis_summary_input(turns)
++    if not body and not prior:
++        return prior
++    parts = []
++    if prior:
++        parts.append("Earlier summary:\n" + prior)
++    if body:
++        parts.append(body)
++    prompt = (
++        "Compress the conversation excerpt below into a compact briefing that "
++        "lets the same task continue. Keep facts, file paths, commands, "
++        "versions, decisions, errors and unresolved questions. Drop "
++        "pleasantries and repetition. Reply with plain text only.\n\n"
++        + "\n\n".join(parts)
++    )
++    try:
++        response = isolis_get_llm().invoke([HumanMessage(content=prompt)])
++        summary = content_to_text(getattr(response, "content", response)).strip()
++        if not summary:
++            summary = _isolis_local_summary(turns, prior)
++    except Exception:
++        summary = _isolis_local_summary(turns, prior)
++    if len(summary) > ISOLIS_SUMMARY_MAX_CHARS:
++        summary = summary[:ISOLIS_SUMMARY_MAX_CHARS] + "\n...[summary cut]..."
++    return summary
++
++
++def isolis_compress(history):
++    global ISOLIS_COMPRESSED_TURNS
++    if ISOLIS_CONTEXT_TOKENS <= 0:
++        return 0
++    folded_total = 0
++    while True:
++        if (
++            isolis_history_tokens(history) + isolis_count_tokens(isolis_system_prompt())
++            <= ISOLIS_CONTEXT_TOKENS
++        ):
++            break
++        marker = history[0] if history and _isolis_marker(history[0]) else None
++        body = history[1:] if marker is not None else list(history)
++        eligible = len(body) - 2
++        if eligible < 2:
++            break
++        batch = min(ISOLIS_COMPRESS_BATCH, eligible)
++        if batch % 2:
++            batch -= 1
++        if batch < 2:
++            break
++        older = body[:batch]
++        rest = body[batch:]
++        prior = ""
++        if marker is not None:
++            prior = marker.get("content", "")[len(ISOLIS_COMPRESS_MARKER):].strip()
++        summary = isolis_summarize(older, prior)
++        isolis_archive_turns(older, "compressed")
++        ISOLIS_COMPRESSED_TURNS += len(older)
++        folded_total += len(older)
++        entry = {"role": "assistant", "content": ISOLIS_COMPRESS_MARKER + " " + summary}
++        history[:] = [entry] + rest
++    return folded_total
++
++
++def isolis_maintain(history):
++    evicted = isolis_evict(history)
++    if ISOLIS_CONTEXT_TOKENS > 0:
++        isolis_compress(history)
++    return evicted
++
++
++def isolis_bound_llm():
++    llm = isolis_get_llm()
++    try:
++        return llm.bind_tools(ISOLIS_TOOLS)
++    except Exception:
++        return llm
++
++
++def isolis_tool_loop(messages):
++    bound = isolis_bound_llm()
++    handlers = {getattr(item, "name", ""): item for item in ISOLIS_TOOLS}
++    current = list(messages)
++    transcript = []
++    last_text = ""
++    for _step in range(ISOLIS_MAX_TOOL_STEPS):
++        response = bound.invoke(current)
++        calls = list(getattr(response, "tool_calls", None) or [])
++        text = content_to_text(getattr(response, "content", response))
++        if text:
++            last_text = text
++        if not calls:
++            return text, transcript
++        current.append(response)
++        for call in calls:
++            name = call.get("name") if isinstance(call, dict) else None
++            args = call.get("args") if isinstance(call, dict) else None
++            if not isinstance(args, dict):
++                args = {}
++            call_id = call.get("id") if isinstance(call, dict) else None
++            call_id = call_id or ("call_%d" % (len(transcript) + 1))
++            handler = handlers.get(name)
++            if handler is None:
++                output = "error: unknown tool %s" % name
++            else:
++                try:
++                    output = handler.invoke(args)
++                except Exception as exc:
++                    output = "error: %s" % exc
++            output = isolis_truncate_output(safe_text(str(output)))
++            transcript.append({"tool": name, "args": args})
++            current.append(ToolMessage(content=output, tool_call_id=call_id))
++    return last_text or ("stopped after %d tool steps" % ISOLIS_MAX_TOOL_STEPS), transcript
++
++
++def isolis_invoke(messages):
++    try:
++        return isolis_tool_loop(messages)
++    except Exception as err:
++        status = error_status(err)
++        text = safe_text(str(err)).lower()
++        if status in (404, 405) or "method not allowed" in text:
++            isolis_flip_protocol()
++            try:
++                return isolis_tool_loop(messages)
++            except Exception as err2:
++                raise RuntimeError(isolis_describe_error(err2)) from err2
++        raise RuntimeError(isolis_describe_error(err)) from err
++
++
++def isolis_build_messages(history, message):
++    messages = [SystemMessage(content=safe_text(isolis_system_prompt()))]
++    for turn in history:
++        if turn.get("role") == "user":
++            messages.append(HumanMessage(content=safe_text(turn.get("content", ""))))
++        else:
++            messages.append(AIMessage(content=safe_text(turn.get("content", ""))))
++    messages.append(HumanMessage(content=safe_text(message)))
++    return messages
+ 
+ 
+ def isolis_chat(message):
+     text = safe_text(message).strip()
+     if not text:
+         raise ValueError("message is empty")
+-    llm = isolis_get_llm()
++    if not isolis_injected():
++        raise RuntimeError(
++            "LLM not injected: MCAI_LLM_BASE_URL and MCAI_LLM_API_KEY are required"
++        )
++    text, trimmed_input = isolis_truncate(text, ISOLIS_MAX_MESSAGE_CHARS)
+     with ISOLIS_HISTORY_LOCK:
+-        prior = list(ISOLIS_HISTORY[-ISOLIS_MAX_TURNS:])
+-    messages = [SystemMessage(content=ISOLIS_SYSTEM_PROMPT)]
+-    messages.extend(prior)
+-    messages.append(HumanMessage(content=text))
+-    response = llm.invoke(messages)
+-    reply = content_to_text(getattr(response, "content", response))
+-    if not reply:
+-        reply = safe_text(str(response))
++        evicted = isolis_maintain(ISOLIS_HISTORY)
++        messages = isolis_build_messages(ISOLIS_HISTORY, text)
++    reply, tools_used = isolis_invoke(messages)
++    reply, trimmed_reply = isolis_truncate(safe_text(reply), ISOLIS_MAX_MESSAGE_CHARS)
+     with ISOLIS_HISTORY_LOCK:
+-        ISOLIS_HISTORY.append(HumanMessage(content=text))
+-        ISOLIS_HISTORY.append(AIMessage(content=reply))
+-        overflow = len(ISOLIS_HISTORY) - ISOLIS_MAX_TURNS
+-        if overflow > 0:
+-            del ISOLIS_HISTORY[:overflow]
+-    return reply
++        ISOLIS_HISTORY.append({"role": "user", "content": text})
++        ISOLIS_HISTORY.append({"role": "assistant", "content": reply})
++        evicted += isolis_maintain(ISOLIS_HISTORY)
++        memory = {
++            "trimmed_input": trimmed_input,
++            "trimmed_reply": trimmed_reply,
++            "evicted": evicted,
++            "compressed_turns": ISOLIS_COMPRESSED_TURNS,
++            "history_turns": _isolis_user_count(ISOLIS_HISTORY),
++            "context_tokens": ISOLIS_CONTEXT_TOKENS,
++            "history_tokens": isolis_history_tokens(ISOLIS_HISTORY),
++        }
++    return {
++        "reply": reply,
++        "tools_used": [item.get("tool") for item in tools_used if item.get("tool")],
++        "memory": memory,
++    }
+ 
+ 
+ class IsolisHandler(BaseHTTPRequestHandler):
+@@ -1495,34 +2109,72 @@ class IsolisHandler(BaseHTTPRequestHandler):
+     def do_GET(self):
+         path = self.path_only()
+         fields = isolis_fields()
+-        if path == "/health":
+-            payload = {"ok": True}
+-            payload.update(fields)
+-            self.send_json(200, payload)
+-            return
+-        if path == "/info":
+-            base = os.environ.get("MCAI_LLM_BASE_URL", "").strip()
+-            key = os.environ.get("MCAI_LLM_API_KEY", "").strip()
+-            payload = {
+-                "ok": True,
+-                "framework": "langchain",
+-                "source": ISOLIS_SOURCE,
+-                "model": isolis_model_name(),
+-                "history_turns": isolis_history_turns(),
+-                "profile": os.environ.get("ISOLIS_PROFILE", "").strip() or "strict",
+-                "llm_host": urlparse(base).netloc if base else "",
+-                "via": "mc-direct",
+-                "injected": bool(base and key),
+-                "tools": [],
+-            }
++        try:
++            if path == "/health":
++                payload = {"ok": True}
++                payload.update(fields)
++                self.send_json(200, payload)
++                return
++            if path == "/info":
++                with ISOLIS_HISTORY_LOCK:
++                    turns = _isolis_user_count(ISOLIS_HISTORY)
++                    tokens = isolis_history_tokens(ISOLIS_HISTORY) + isolis_count_tokens(
++                        isolis_system_prompt()
++                    )
++                payload = {
++                    "ok": True,
++                    "framework": "langchain",
++                    "source": ISOLIS_SOURCE,
++                    "profile": ISOLIS_PROFILE,
++                    "install": ISOLIS_INSTALL,
++                    "android_home": ISOLIS_ANDROID_HOME,
++                    "model": isolis_model_name(),
++                    "llm_host": isolis_llm_host(),
++                    "via": "mc-direct",
++                    "injected": isolis_injected(),
++                    "protocol": isolis_detect_protocol() if isolis_injected() else "unset",
++                    "tools": isolis_tool_names(),
++                    "workspace": ISOLIS_WORKSPACE,
++                    "history_turns": turns,
++                    "history_tokens": tokens,
++                    "context_tokens": ISOLIS_CONTEXT_TOKENS,
++                    "context_hard_limit": ISOLIS_CONTEXT_HARD_LIMIT,
++                    "max_message_chars": ISOLIS_MAX_MESSAGE_CHARS,
++                    "max_turns": ISOLIS_MAX_TURNS,
++                    "compress_batch": ISOLIS_COMPRESS_BATCH,
++                    "compressed_turns": ISOLIS_COMPRESSED_TURNS,
++                    "archived_turns": isolis_archive_len(),
++                }
++                payload.update(fields)
++                self.send_json(200, payload)
++                return
++            if path == "/history":
++                with ISOLIS_HISTORY_LOCK:
++                    live = [dict(turn) for turn in ISOLIS_HISTORY]
++                    tokens = isolis_history_tokens(ISOLIS_HISTORY)
++                payload = {
++                    "ok": True,
++                    "context_tokens": ISOLIS_CONTEXT_TOKENS,
++                    "history_tokens": tokens,
++                    "compressed_turns": ISOLIS_COMPRESSED_TURNS,
++                    "history": live,
++                    "archive": isolis_load_archive(),
++                }
++                payload.update(fields)
++                self.send_json(200, payload)
++                return
++            self.send_json(404, {"ok": False, "error": "not found"})
++        except Exception as exc:
++            payload = {"ok": False, "error": str(exc), "trace": traceback.format_exc()}
+             payload.update(fields)
+-            self.send_json(200, payload)
+-            return
+-        self.send_json(404, {"ok": False, "error": "not found"})
++            self.send_json(500, payload)
+ 
+     def do_POST(self):
++        fields = isolis_fields()
+         if self.path_only() != "/chat":
+-            self.send_json(404, {"ok": False, "error": "not found"})
++            payload = {"ok": False, "error": "not found"}
++            payload.update(fields)
++            self.send_json(404, payload)
+             return
+         try:
+             length = int(self.headers.get("Content-Length") or 0)
+@@ -1532,31 +2184,42 @@ class IsolisHandler(BaseHTTPRequestHandler):
+         try:
+             data = json.loads(raw.decode("utf-8", "replace"))
+         except (ValueError, UnicodeDecodeError):
+-            self.send_json(400, {"ok": False, "error": "invalid json"})
++            payload = {"ok": False, "error": "invalid json"}
++            payload.update(fields)
++            self.send_json(400, payload)
+             return
+         if not isinstance(data, dict):
+-            self.send_json(400, {"ok": False, "error": "message is empty"})
++            payload = {"ok": False, "error": "message is empty"}
++            payload.update(fields)
++            self.send_json(400, payload)
+             return
+         message = data.get("message")
+         if not isinstance(message, str) or not message.strip():
+-            self.send_json(400, {"ok": False, "error": "message is empty"})
++            payload = {"ok": False, "error": "message is empty"}
++            payload.update(fields)
++            self.send_json(400, payload)
+             return
+         try:
+-            reply = isolis_chat(message)
+-            payload = {"ok": True, "reply": reply}
+-            payload.update(isolis_fields())
++            result = isolis_chat(message)
++            payload = {
++                "ok": True,
++                "reply": result["reply"],
++                "tools_used": result["tools_used"],
++                "memory": result["memory"],
++            }
++            payload.update(fields)
+             self.send_json(200, payload)
+         except ValueError as exc:
+-            self.send_json(400, {"ok": False, "error": str(exc)})
++            payload = {"ok": False, "error": str(exc)}
++            payload.update(fields)
++            self.send_json(400, payload)
+         except Exception as exc:
+-            self.send_json(
+-                500,
+-                {"ok": False, "error": str(exc), "trace": traceback.format_exc()},
+-            )
++            payload = {"ok": False, "error": str(exc), "trace": traceback.format_exc()}
++            payload.update(fields)
++            self.send_json(500, payload)
+ 
+ 
+ def isolis_main():
+-    isolis_require_injected()
+     os.environ.setdefault("TIKTOKEN_CACHE_DIR", "/tmp")
+     server = ThreadingHTTPServer(("0.0.0.0", 8080), IsolisHandler)
+     server.daemon_threads = True
+diff --git a/isolis.py b/isolis.py
+index cca1cf7..8851efe 100755
+--- a/isolis.py
++++ b/isolis.py
+@@ -35,7 +35,6 @@ BANNED_MODELS = {
+     "auto",
+     "step-5-preview",
+     "deepseek-chat",
+-    "deepseek-flash",
+ }
+ DEFAULT_MODEL = "monkeycode-pro/gpt-5.6-terra"
+ MODEL_PREFIX = "monkeycode-pro/"
+@@ -80,6 +79,7 @@ ANDROID_PATH_ENV = (
+ )
+ STATE_DIR = ".isolis"
+ STATE_FILE = os.path.join(STATE_DIR, "state.json")
++CONFIG_FILE = os.path.join(STATE_DIR, "isolis.config.json")
+ AGENT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent")
+ AGENT_SRC_DIR = os.path.join(STATE_DIR, "agent-src")
+ 
+@@ -322,10 +322,22 @@ def load_state():
+         agents = {}
+     clean = {}
+     for name, entry in agents.items():
+-        if isinstance(name, str) and isinstance(entry, dict):
+-            clean[name] = entry
++        if not isinstance(name, str) or not isinstance(entry, dict):
++            continue
++        record = {"name": name}
++        container = entry.get("container")
++        record["container"] = (
++            container if isinstance(container, str) and container else "isolis-" + name
++        )
++        port = entry.get("port")
++        record["port"] = port if isinstance(port, int) else None
++        for field in ("hostname", "model", "profile", "source", "created_at"):
++            value = entry.get(field)
++            if isinstance(value, str):
++                record[field] = value
++        clean[name] = record
+     current = data.get("current")
+-    if not isinstance(current, str):
++    if not isinstance(current, str) or current not in clean:
+         current = None
+     return {"version": 1, "current": current, "agents": clean}
+ 
+@@ -433,6 +445,7 @@ def detect_llm():
+         )
+     model = pick_model(
+         os.environ.get("ISOLIS_MODEL", "").strip()
++        or load_config()["model"]
+         or os.environ.get("MCAI_LLM_MODEL", ""),
+         body,
+     )
+@@ -486,13 +499,86 @@ def context_tokens():
+ 
+ 
+ def profile_from_env():
+-    return os.environ.get("ISOLIS_PROFILE", "").strip() or DEFAULT_PROFILE
++    return (
++        os.environ.get("ISOLIS_PROFILE", "").strip()
++        or load_config()["default_profile"]
++        or DEFAULT_PROFILE
++    )
+ 
+ 
+ def source_from_env():
+     return os.environ.get("ISOLIS_AGENT_SOURCE", "").strip() or "local"
+ 
+ 
++CONFIG_KEYS = {
++    "memory",
++    "cpus",
++    "pids",
++    "workspace",
++    "tmp",
++    "shm",
++    "user",
++    "caps",
++    "read_only",
++    "install",
++}
++
++
++def load_config():
++    """Read .isolis/isolis.config.json. Missing file means defaults."""
++    if not os.path.exists(CONFIG_FILE):
++        return {"profiles": {}, "prompt": "", "model": "", "default_profile": ""}
++    try:
++        with open(CONFIG_FILE, "r", encoding="utf-8") as handle:
++            data = json.load(handle)
++    except (OSError, ValueError) as exc:
++        raise IsolisError("cannot read %s: %s" % (CONFIG_FILE, exc))
++    if not isinstance(data, dict):
++        raise IsolisError("%s must contain a JSON object" % CONFIG_FILE)
++
++    profiles = {}
++    raw_profiles = data.get("profiles") or {}
++    if not isinstance(raw_profiles, dict):
++        raise IsolisError("config 'profiles' must be an object")
++    for name, override in raw_profiles.items():
++        if not isinstance(name, str) or not isinstance(override, dict):
++            raise IsolisError("config profiles entries must be objects")
++        unknown = set(override) - CONFIG_KEYS
++        if unknown:
++            raise IsolisError(
++                "profile %s has unknown keys: %s (allowed: %s)"
++                % (name, ", ".join(sorted(unknown)), ", ".join(sorted(CONFIG_KEYS)))
++            )
++        profiles[name.strip().lower()] = override
++
++    prompt = data.get("prompt") or ""
++    prompt_file = data.get("prompt_file") or ""
++    if prompt_file:
++        path = prompt_file
++        if not os.path.isabs(path):
++            workspace_root = os.path.dirname(os.path.dirname(os.path.abspath(CONFIG_FILE)))
++            path = os.path.join(workspace_root, path)
++        try:
++            with open(path, "r", encoding="utf-8") as handle:
++                prompt = handle.read()
++        except OSError as exc:
++            raise IsolisError("cannot read prompt_file %s: %s" % (prompt_file, exc))
++    if not isinstance(prompt, str):
++        raise IsolisError("config 'prompt' must be a string")
++
++    model = data.get("model") or ""
++    default_profile = data.get("default_profile") or ""
++    if not isinstance(model, str) or not isinstance(default_profile, str):
++        raise IsolisError("config 'model' and 'default_profile' must be strings")
++    return {
++        "profiles": profiles,
++        "prompt": prompt.strip(),
++        "model": model.strip(),
++        "default_profile": default_profile.strip().lower(),
++    }
++
++
++
+ def port_in_use(port):
+     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+     sock.settimeout(0.2)
+@@ -637,19 +723,37 @@ def ensure_network():
+ 
+ 
+ def image_tag(profile, source):
++    resolved = os.path.abspath(source_dir(sanitize_source(source)))
+     digest = hashlib.sha256(
+-        (profile + "\n" + source).encode("utf-8")
++        (profile + "\n" + resolved).encode("utf-8")
+     ).hexdigest()[:10]
+     return "isolis-agent:%s-%s" % (profile, digest)
+ 
+ 
+ def profile_config(name):
++    """Resolve a profile, merging .isolis/isolis.config.json overrides on top."""
+     key = (name or DEFAULT_PROFILE).strip().lower()
+-    if key not in PROFILES:
++    overrides = load_config()["profiles"]
++    base = PROFILES.get(key)
++    if base is None and key in overrides:
++        base = dict(PROFILES[DEFAULT_PROFILE])
++    if base is None:
++        known = sorted(set(PROFILES) | set(overrides))
+         raise IsolisError(
+-            "unknown profile: %s (choose: %s)" % (name, ", ".join(sorted(PROFILES)))
++            "unknown profile: %s (choose: %s)" % (name, ", ".join(known))
+         )
+-    return key, PROFILES[key]
++    cfg = dict(base)
++    cfg.update(overrides.get(key) or {})
++    if not isinstance(cfg.get("caps"), list):
++        raise IsolisError("profile %s: 'caps' must be a list" % key)
++    if not isinstance(cfg.get("read_only"), bool):
++        raise IsolisError("profile %s: 'read_only' must be true or false" % key)
++    if not isinstance(cfg.get("install"), bool):
++        raise IsolisError("profile %s: 'install' must be true or false" % key)
++    for field in ("memory", "cpus", "pids", "workspace", "tmp", "shm", "user"):
++        if not isinstance(cfg.get(field), str) or not cfg[field].strip():
++            raise IsolisError("profile %s: '%s' must be a non-empty string" % (key, field))
++    return key, cfg
+ 
+ 
+ def sanitize_source(source):
+@@ -687,9 +791,9 @@ def resolve_agent_dir(source):
+         )
+         if proc.returncode != 0:
+             detail = (proc.stderr or proc.stdout).strip()
+-            raise IsolisError(
+-                "cannot update agent source %s: %s"
+-                % (source, detail.splitlines()[-1] if detail else "git pull failed")
++            print(
++                "notice: cannot fast-forward agent source %s (%s); keeping the "
++                "local clone" % (source, detail.splitlines()[-1] if detail else "git pull failed")
+             )
+     else:
+         print("cloning agent source %s ..." % source)
+@@ -713,6 +817,7 @@ def resolve_agent_dir(source):
+ def start_container(name, container, port, llm, profile="tooled",
+                     agent_dir=None, source="local"):
+     key, cfg = profile_config(profile)
++    config = load_config()
+     tag = image_tag(key, sanitize_source(source))
+     args = [
+         "run",
+@@ -784,9 +889,13 @@ def start_container(name, container, port, llm, profile="tooled",
+         "-e",
+         "MCAI_LLM_MODEL=" + llm["model"],
+         "-e",
++        "ISOLIS_MODEL=" + llm["model"],
++        "-e",
+         "ISOLIS_FALLBACK_MODEL=" + (
+             os.environ.get("ISOLIS_DEFAULT_MODEL", "").strip() or DEFAULT_MODEL
+         ),
++        "-e",
++        "ISOLIS_SYSTEM_PROMPT=" + config["prompt"],
+         tag,
+     ]
+     run_docker(args, timeout=300)
+@@ -1117,6 +1226,23 @@ def cmd_doctor():
+         print("  [fail] %s" % exc)
+         ok = False
+ 
++    try:
++        user_config = load_config()
++        if os.path.exists(CONFIG_FILE):
++            print("  [ok]   config: %s" % CONFIG_FILE)
++            if user_config["profiles"]:
++                print("         tuned profiles: %s"
++                      % ", ".join(sorted(user_config["profiles"])))
++            if user_config["prompt"]:
++                print("         custom prompt: %d chars" % len(user_config["prompt"]))
++            if user_config["model"]:
++                print("         model override: %s" % user_config["model"])
++        else:
++            print("  [ok]   config: built-in defaults (no %s)" % CONFIG_FILE)
++    except IsolisError as exc:
++        print("  [fail] %s" % exc)
++        ok = False
++
+     print("result: %s" % ("ready" if ok else "not ready (fix the [fail] lines)"))
+     return ok
+ 
+@@ -1326,6 +1452,15 @@ environment:
+   ISOLIS_PROFILE, ISOLIS_AGENT_SOURCE, ISOLIS_MODEL, ISOLIS_DEFAULT_MODEL
+   ISOLIS_CONTEXT_TOKENS    token budget before memory compression (0 = off)
+   ISOLIS_MAX_MESSAGE_CHARS per-message character cap
++
++config file (.isolis/isolis.config.json, optional):
++  {"profiles": {"tooled": {"memory": "8g"}},
++   "prompt": "custom system prompt",
++   "prompt_file": "prompt.md",
++   "model": "monkeycode-pro/gpt-5.6-terra",
++   "default_profile": "tooled"}
++  Edit it, then run stop + init. No image rebuild needed unless you
++  change files baked into the image (Dockerfile, requirements, server.py).
+ """
+ 
+ 
+@@ -1349,12 +1484,17 @@ def parse_options(args):
+ 
+ 
+ def cmd_profiles():
++    config = load_config()
++    custom = config["profiles"]
++    names = sorted(set(PROFILES) | set(custom))
+     print("capability profiles:")
+-    for name in sorted(PROFILES):
+-        cfg = PROFILES[name]
++    for name in names:
++        _, cfg = profile_config(name)
++        mark = "*" if name in custom else " "
+         print(
+-            "  %-8s install %-3s memory %-4s cpus %-3s pids %-4s user %s"
++            "%s %-8s install %-3s memory %-4s cpus %-3s pids %-4s user %s"
+             % (
++                mark,
+                 name,
+                 "on" if cfg["install"] else "off",
+                 cfg["memory"],
+@@ -1363,7 +1503,16 @@ def cmd_profiles():
+                 cfg["user"],
+             )
+         )
+-    print("default: %s" % DEFAULT_PROFILE)
++    if custom:
++        print("* = tuned in %s" % CONFIG_FILE)
++    print("default: %s" % profile_from_env())
++    if config["prompt"]:
++        first = config["prompt"].splitlines()[0][:60]
++        print("prompt: %s (%d chars)" % (first, len(config["prompt"])))
++    else:
++        print("prompt: built-in")
++    if config["model"]:
++        print("model override: %s" % config["model"])
+ 
+ 
+ def apply_model_override(opts):
+diff --git a/tests/test_agent_server.py b/tests/test_agent_server.py
+index cc14e0a..19e3821 100644
+--- a/tests/test_agent_server.py
++++ b/tests/test_agent_server.py
+@@ -145,12 +145,22 @@ def test_chat_without_injection_returns_clear_error(monkeypatch):
+         srv.shutdown()
+ 
+ 
+-def test_dockerfile_has_no_android_or_jdk_and_pins_base():
++def test_dockerfile_pins_base_and_ships_dev_toolchain():
+     text = open("agent/Dockerfile", encoding="utf-8").read()
+-    assert "python:3.12-slim" in text
+-    for banned in ("android", "ANDROID_HOME", "openjdk", "JAVA_HOME", "GRADLE"):
+-        assert banned not in text
+-    assert "tiktoken" not in text.lower() or "TIKTOKEN_CACHE_DIR=/tmp" in text
++    assert "python:3.12-slim-bookworm" in text
++    for required in (
++        "openjdk-17-jdk-headless",
++        "ANDROID_HOME=/opt/android-sdk",
++        "JAVA_HOME",
++        "build-essential",
++        "cmake",
++        "pkg-config",
++        "nodejs",
++        "npm",
++        "install-android-sdk.sh",
++    ):
++        assert required in text
++    assert "TIKTOKEN_CACHE_DIR=/tmp" in text
+ 
+ 
+ def test_requirements_pins_four_packages():

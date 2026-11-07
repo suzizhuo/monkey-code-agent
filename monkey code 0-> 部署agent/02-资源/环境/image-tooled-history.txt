@@ -1,0 +1,24 @@
+IMAGE          CREATED          CREATED BY                                      SIZE      COMMENT
+7f61f25b2cab   20 minutes ago   /bin/sh -c #(nop)  CMD ["python" "/app/serve…   0B        
+e29b2fb43194   20 minutes ago   /bin/sh -c #(nop)  ENTRYPOINT ["/usr/bin/tin…   0B        
+5f4537b5d08f   20 minutes ago   /bin/sh -c #(nop)  EXPOSE 8080                  0B        
+0c972f1d54fa   20 minutes ago   /bin/sh -c chmod +x /app/install-android-sdk…   1.38kB    
+19245d0daacb   20 minutes ago   /bin/sh -c #(nop) COPY file:31107651a7d40345…   1.38kB    
+595036d3b9be   20 minutes ago   /bin/sh -c #(nop) COPY file:c5270b3c0a760633…   78.6kB    
+70c71b74eb96   20 minutes ago   /bin/sh -c mkdir -p /opt/android-sdk     && …   82B       
+ca37aff2dc62   21 minutes ago   /bin/sh -c python -m playwright install --wi…   965MB     
+b7363e12c864   30 minutes ago   /bin/sh -c pip install --no-cache-dir -r /ap…   239MB     
+60b787e26ea0   32 minutes ago   /bin/sh -c #(nop) COPY file:b645e60f015ada85…   174B      
+1b8618de6da6   32 minutes ago   /bin/sh -c #(nop) WORKDIR /app                  0B        
+312d5c64ef1b   32 minutes ago   /bin/sh -c apt-get update     && apt-get ins…   902MB     
+ac9e06306d2a   40 minutes ago   /bin/sh -c #(nop)  ENV PYTHONUNBUFFERED=1 PY…   0B        
+313cf8f190a1   24 hours ago     CMD ["python3"]                                 0B        buildkit.dockerfile.v0
+<missing>      24 hours ago     RUN /bin/sh -c set -eux;  for src in idle3 p…   36B       buildkit.dockerfile.v0
+<missing>      24 hours ago     RUN /bin/sh -c set -eux;   savedAptMark="$(a…   40.3MB    buildkit.dockerfile.v0
+<missing>      24 hours ago     ENV PYTHON_SHA256=b5796915dc45ff745cfb4e990a…   0B        buildkit.dockerfile.v0
+<missing>      24 hours ago     ENV PYTHON_VERSION=3.12.16                      0B        buildkit.dockerfile.v0
+<missing>      24 hours ago     ENV GPG_KEY=7169605F62C751356D054A26A821E680…   0B        buildkit.dockerfile.v0
+<missing>      24 hours ago     RUN /bin/sh -c set -eux;  apt-get update;  a…   8.52MB    buildkit.dockerfile.v0
+<missing>      24 hours ago     ENV LANG=C.UTF-8                                0B        buildkit.dockerfile.v0
+<missing>      24 hours ago     ENV PATH=/usr/local/bin:/usr/local/sbin:/usr…   0B        buildkit.dockerfile.v0
+<missing>      35 hours ago     # debian.sh --arch 'amd64' out/ 'bookworm' '…   74.9MB    debuerreotype 0.17

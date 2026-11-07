@@ -1,0 +1,189 @@
+time="2026-11-06T07:15:25.352403970Z" level=info msg="Starting up"
+time="2026-11-06T07:15:25.354437861Z" level=info msg="libcontainerd: started new containerd process" pid=28274
+time="2026-11-06T07:15:25.354512545Z" level=info msg="[core] parsed scheme: \"unix\"" module=grpc
+time="2026-11-06T07:15:25.354524204Z" level=info msg="[core] scheme \"unix\" not registered, fallback to default scheme" module=grpc
+time="2026-11-06T07:15:25.354550459Z" level=info msg="[core] ccResolverWrapper: sending update to cc: {[{unix:///var/run/docker/containerd/containerd.sock  <nil> 0 <nil>}] <nil> <nil>}" module=grpc
+time="2026-11-06T07:15:25.354561777Z" level=info msg="[core] ClientConn switching balancer to \"pick_first\"" module=grpc
+time="2026-11-06T07:15:25.354567710Z" level=info msg="[core] Channel switches to new LB policy \"pick_first\"" module=grpc
+time="2026-11-06T07:15:25.354626766Z" level=info msg="[core] Subchannel Connectivity change to CONNECTING" module=grpc
+time="2026-11-06T07:15:25.354674980Z" level=info msg="[core] Subchannel picks a new address \"unix:///var/run/docker/containerd/containerd.sock\" to connect" module=grpc
+time="2026-11-06T07:15:25.355017245Z" level=info msg="[core] Channel Connectivity change to CONNECTING" module=grpc
+time="2026-11-06T07:15:25Z" level=warning msg="containerd config version `1` has been deprecated and will be removed in containerd v2.0, please switch to version `2`, see https://github.com/containerd/containerd/blob/main/docs/PLUGINS.md#version-header"
+time="2026-11-06T07:15:25.378035351Z" level=info msg="starting containerd" revision="1.6.20~ds1-1+deb12u3" version="1.6.20~ds1"
+time="2026-11-06T07:15:25.391698849Z" level=info msg="loading plugin \"io.containerd.content.v1.content\"..." type=io.containerd.content.v1
+time="2026-11-06T07:15:25.391899370Z" level=info msg="loading plugin \"io.containerd.snapshotter.v1.aufs\"..." type=io.containerd.snapshotter.v1
+time="2026-11-06T07:15:25.392100870Z" level=info msg="skip loading plugin \"io.containerd.snapshotter.v1.aufs\"..." error="aufs is not supported (modprobe aufs failed: exec: \"modprobe\": executable file not found in $PATH \"\"): skip plugin" type=io.containerd.snapshotter.v1
+time="2026-11-06T07:15:25.392127178Z" level=info msg="loading plugin \"io.containerd.snapshotter.v1.btrfs\"..." type=io.containerd.snapshotter.v1
+time="2026-11-06T07:15:25.392260087Z" level=info msg="skip loading plugin \"io.containerd.snapshotter.v1.btrfs\"..." error="path /var/lib/docker/containerd/daemon/io.containerd.snapshotter.v1.btrfs (ext4) must be a btrfs filesystem to be used with the btrfs snapshotter: skip plugin" type=io.containerd.snapshotter.v1
+time="2026-11-06T07:15:25.392273307Z" level=info msg="loading plugin \"io.containerd.snapshotter.v1.devmapper\"..." type=io.containerd.snapshotter.v1
+time="2026-11-06T07:15:25.392284370Z" level=warning msg="failed to load plugin io.containerd.snapshotter.v1.devmapper" error="devmapper not configured"
+time="2026-11-06T07:15:25.392292543Z" level=info msg="loading plugin \"io.containerd.snapshotter.v1.native\"..." type=io.containerd.snapshotter.v1
+time="2026-11-06T07:15:25.392399419Z" level=info msg="loading plugin \"io.containerd.snapshotter.v1.overlayfs\"..." type=io.containerd.snapshotter.v1
+time="2026-11-06T07:15:25.392931468Z" level=info msg="loading plugin \"io.containerd.snapshotter.v1.zfs\"..." type=io.containerd.snapshotter.v1
+time="2026-11-06T07:15:25.393096069Z" level=info msg="skip loading plugin \"io.containerd.snapshotter.v1.zfs\"..." error="path /var/lib/docker/containerd/daemon/io.containerd.snapshotter.v1.zfs must be a zfs filesystem to be used with the zfs snapshotter: skip plugin" type=io.containerd.snapshotter.v1
+time="2026-11-06T07:15:25.393111639Z" level=info msg="loading plugin \"io.containerd.metadata.v1.bolt\"..." type=io.containerd.metadata.v1
+time="2026-11-06T07:15:25.393196146Z" level=warning msg="could not use snapshotter devmapper in metadata plugin" error="devmapper not configured"
+time="2026-11-06T07:15:25.393206134Z" level=info msg="metadata content store policy set" policy=shared
+time="2026-11-06T07:15:25.394669081Z" level=info msg="loading plugin \"io.containerd.differ.v1.walking\"..." type=io.containerd.differ.v1
+time="2026-11-06T07:15:25.394693454Z" level=info msg="loading plugin \"io.containerd.event.v1.exchange\"..." type=io.containerd.event.v1
+time="2026-11-06T07:15:25.394705353Z" level=info msg="loading plugin \"io.containerd.gc.v1.scheduler\"..." type=io.containerd.gc.v1
+time="2026-11-06T07:15:25.394760369Z" level=info msg="loading plugin \"io.containerd.service.v1.introspection-service\"..." type=io.containerd.service.v1
+time="2026-11-06T07:15:25.394773556Z" level=info msg="loading plugin \"io.containerd.service.v1.containers-service\"..." type=io.containerd.service.v1
+time="2026-11-06T07:15:25.394786348Z" level=info msg="loading plugin \"io.containerd.service.v1.content-service\"..." type=io.containerd.service.v1
+time="2026-11-06T07:15:25.394797244Z" level=info msg="loading plugin \"io.containerd.service.v1.diff-service\"..." type=io.containerd.service.v1
+time="2026-11-06T07:15:25.394816380Z" level=info msg="loading plugin \"io.containerd.service.v1.images-service\"..." type=io.containerd.service.v1
+time="2026-11-06T07:15:25.394827744Z" level=info msg="loading plugin \"io.containerd.service.v1.leases-service\"..." type=io.containerd.service.v1
+time="2026-11-06T07:15:25.394838836Z" level=info msg="loading plugin \"io.containerd.service.v1.namespaces-service\"..." type=io.containerd.service.v1
+time="2026-11-06T07:15:25.394850225Z" level=info msg="loading plugin \"io.containerd.service.v1.snapshots-service\"..." type=io.containerd.service.v1
+time="2026-11-06T07:15:25.394864070Z" level=info msg="loading plugin \"io.containerd.runtime.v1.linux\"..." type=io.containerd.runtime.v1
+time="2026-11-06T07:15:25.395038883Z" level=info msg="loading plugin \"io.containerd.runtime.v2.task\"..." type=io.containerd.runtime.v2
+time="2026-11-06T07:15:25.395150458Z" level=info msg="loading plugin \"io.containerd.monitor.v1.cgroups\"..." type=io.containerd.monitor.v1
+time="2026-11-06T07:15:25.395428097Z" level=info msg="loading plugin \"io.containerd.service.v1.tasks-service\"..." type=io.containerd.service.v1
+time="2026-11-06T07:15:25.395461159Z" level=info msg="loading plugin \"io.containerd.grpc.v1.introspection\"..." type=io.containerd.grpc.v1
+time="2026-11-06T07:15:25.395484313Z" level=info msg="loading plugin \"io.containerd.internal.v1.restart\"..." type=io.containerd.internal.v1
+time="2026-11-06T07:15:25.395598053Z" level=info msg="loading plugin \"io.containerd.grpc.v1.containers\"..." type=io.containerd.grpc.v1
+time="2026-11-06T07:15:25.395611897Z" level=info msg="loading plugin \"io.containerd.grpc.v1.content\"..." type=io.containerd.grpc.v1
+time="2026-11-06T07:15:25.395622562Z" level=info msg="loading plugin \"io.containerd.grpc.v1.diff\"..." type=io.containerd.grpc.v1
+time="2026-11-06T07:15:25.395646859Z" level=info msg="loading plugin \"io.containerd.grpc.v1.events\"..." type=io.containerd.grpc.v1
+time="2026-11-06T07:15:25.395663311Z" level=info msg="loading plugin \"io.containerd.grpc.v1.healthcheck\"..." type=io.containerd.grpc.v1
+time="2026-11-06T07:15:25.395678204Z" level=info msg="loading plugin \"io.containerd.grpc.v1.images\"..." type=io.containerd.grpc.v1
+time="2026-11-06T07:15:25.395688301Z" level=info msg="loading plugin \"io.containerd.grpc.v1.leases\"..." type=io.containerd.grpc.v1
+time="2026-11-06T07:15:25.395697983Z" level=info msg="loading plugin \"io.containerd.grpc.v1.namespaces\"..." type=io.containerd.grpc.v1
+time="2026-11-06T07:15:25.395711984Z" level=info msg="loading plugin \"io.containerd.internal.v1.opt\"..." type=io.containerd.internal.v1
+time="2026-11-06T07:15:25.397565781Z" level=info msg="loading plugin \"io.containerd.grpc.v1.snapshots\"..." type=io.containerd.grpc.v1
+time="2026-11-06T07:15:25.397600553Z" level=info msg="loading plugin \"io.containerd.grpc.v1.tasks\"..." type=io.containerd.grpc.v1
+time="2026-11-06T07:15:25.397614310Z" level=info msg="loading plugin \"io.containerd.grpc.v1.version\"..." type=io.containerd.grpc.v1
+time="2026-11-06T07:15:25.397876033Z" level=info msg=serving... address=/var/run/docker/containerd/containerd-debug.sock
+time="2026-11-06T07:15:25.397922639Z" level=info msg=serving... address=/var/run/docker/containerd/containerd.sock.ttrpc
+time="2026-11-06T07:15:25.397984797Z" level=info msg=serving... address=/var/run/docker/containerd/containerd.sock
+time="2026-11-06T07:15:25.398004189Z" level=info msg="containerd successfully booted in 0.020955s"
+time="2026-11-06T07:15:25.401045359Z" level=info msg="[core] Subchannel Connectivity change to READY" module=grpc
+time="2026-11-06T07:15:25.401084615Z" level=info msg="[core] Channel Connectivity change to READY" module=grpc
+time="2026-11-06T07:15:25.404161007Z" level=info msg="[core] parsed scheme: \"unix\"" module=grpc
+time="2026-11-06T07:15:25.404181467Z" level=info msg="[core] scheme \"unix\" not registered, fallback to default scheme" module=grpc
+time="2026-11-06T07:15:25.404217744Z" level=info msg="[core] ccResolverWrapper: sending update to cc: {[{unix:///var/run/docker/containerd/containerd.sock  <nil> 0 <nil>}] <nil> <nil>}" module=grpc
+time="2026-11-06T07:15:25.404230893Z" level=info msg="[core] ClientConn switching balancer to \"pick_first\"" module=grpc
+time="2026-11-06T07:15:25.404238070Z" level=info msg="[core] Channel switches to new LB policy \"pick_first\"" module=grpc
+time="2026-11-06T07:15:25.404255876Z" level=info msg="[core] Subchannel Connectivity change to CONNECTING" module=grpc
+time="2026-11-06T07:15:25.404283526Z" level=info msg="[core] Subchannel picks a new address \"unix:///var/run/docker/containerd/containerd.sock\" to connect" module=grpc
+time="2026-11-06T07:15:25.404631190Z" level=info msg="[core] Channel Connectivity change to CONNECTING" module=grpc
+time="2026-11-06T07:15:25.407887870Z" level=info msg="[core] Subchannel Connectivity change to READY" module=grpc
+time="2026-11-06T07:15:25.407927805Z" level=info msg="[core] Channel Connectivity change to READY" module=grpc
+time="2026-11-06T07:15:25.408579174Z" level=info msg="[core] parsed scheme: \"unix\"" module=grpc
+time="2026-11-06T07:15:25.408592241Z" level=info msg="[core] scheme \"unix\" not registered, fallback to default scheme" module=grpc
+time="2026-11-06T07:15:25.408609133Z" level=info msg="[core] ccResolverWrapper: sending update to cc: {[{unix:///var/run/docker/containerd/containerd.sock  <nil> 0 <nil>}] <nil> <nil>}" module=grpc
+time="2026-11-06T07:15:25.408617529Z" level=info msg="[core] ClientConn switching balancer to \"pick_first\"" module=grpc
+time="2026-11-06T07:15:25.408623861Z" level=info msg="[core] Channel switches to new LB policy \"pick_first\"" module=grpc
+time="2026-11-06T07:15:25.408659207Z" level=info msg="[core] Subchannel Connectivity change to CONNECTING" module=grpc
+time="2026-11-06T07:15:25.408678407Z" level=info msg="[core] Subchannel picks a new address \"unix:///var/run/docker/containerd/containerd.sock\" to connect" module=grpc
+time="2026-11-06T07:15:25.408746081Z" level=info msg="[core] Channel Connectivity change to CONNECTING" module=grpc
+time="2026-11-06T07:15:25.409105813Z" level=info msg="[core] Subchannel Connectivity change to READY" module=grpc
+time="2026-11-06T07:15:25.409133412Z" level=info msg="[core] Channel Connectivity change to READY" module=grpc
+time="2026-11-06T07:15:25.826333555Z" level=info msg="Loading containers: start."
+time="2026-11-06T07:15:25.897649536Z" level=info msg="Default bridge (docker0) is assigned with an IP address 172.17.0.0/16. Daemon option --bip can be used to set a preferred IP address"
+time="2026-11-06T07:15:25.949383065Z" level=info msg="Loading containers: done."
+time="2026-11-06T07:15:25.958294685Z" level=info msg="Docker daemon" commit=5d6db84 graphdriver(s)=overlay2 version=20.10.24+dfsg1
+time="2026-11-06T07:15:25.958439322Z" level=info msg="Daemon has completed initialization"
+time="2026-11-06T07:15:25.969042734Z" level=info msg="API listen on /var/run/docker.sock"
+time="2026-11-06T07:16:15.288384790Z" level=info msg="Layer sha256:1302b8d1650f9441d09a6a7647f374a24a56e2d31eedeb529caf132416643c0b cleaned up"
+time="2026-11-06T07:16:16.761398549Z" level=info msg="loading plugin \"io.containerd.event.v1.publisher\"..." runtime=io.containerd.runc.v2 type=io.containerd.event.v1
+time="2026-11-06T07:16:16.761854957Z" level=info msg="loading plugin \"io.containerd.internal.v1.shutdown\"..." runtime=io.containerd.runc.v2 type=io.containerd.internal.v1
+time="2026-11-06T07:16:16.761896029Z" level=info msg="loading plugin \"io.containerd.ttrpc.v1.task\"..." runtime=io.containerd.runc.v2 type=io.containerd.ttrpc.v1
+time="2026-11-06T07:16:16.762460691Z" level=info msg="starting signal loop" namespace=moby path=/run/docker/containerd/daemon/io.containerd.runtime.v2.task/moby/4c09bf1fda0d848cc8ac5b1849a7265d3e76b266d24a83c2b6399df9c6f1b56e pid=32414 runtime=io.containerd.runc.v2
+time="2026-11-06T07:17:24.793071820Z" level=error msg="Handler for GET /v1.41/containers/4c09bf1fda0d848cc8ac5b1849a7265d3e76b266d24a83c2b6399df9c6f1b56e/logs returned error: configured logging driver does not support reading"
+time="2026-11-06T07:20:47.753660713Z" level=info msg="ignoring event" container=4c09bf1fda0d848cc8ac5b1849a7265d3e76b266d24a83c2b6399df9c6f1b56e module=libcontainerd namespace=moby topic=/tasks/delete type="*events.TaskDelete"
+time="2026-11-06T07:20:47.754172817Z" level=info msg="shim disconnected" id=4c09bf1fda0d848cc8ac5b1849a7265d3e76b266d24a83c2b6399df9c6f1b56e
+time="2026-11-06T07:20:47.965121294Z" level=warning msg="cleaning up after shim disconnected" id=4c09bf1fda0d848cc8ac5b1849a7265d3e76b266d24a83c2b6399df9c6f1b56e namespace=moby
+time="2026-11-06T07:20:47.965144708Z" level=info msg="cleaning up dead shim"
+time="2026-11-06T07:20:48.392016017Z" level=warning msg="cleanup warnings time=\"2026-11-06T07:20:48Z\" level=info msg=\"starting signal loop\" namespace=moby pid=26131 runtime=io.containerd.runc.v2\n"
+time="2026-11-06T07:22:06.259884734Z" level=error msg="Handler for GET /v1.41/system/df returned error: context canceled"
+time="2026-11-06T07:24:40.468123639Z" level=info msg="loading plugin \"io.containerd.event.v1.publisher\"..." runtime=io.containerd.runc.v2 type=io.containerd.event.v1
+time="2026-11-06T07:24:40.568733087Z" level=info msg="loading plugin \"io.containerd.internal.v1.shutdown\"..." runtime=io.containerd.runc.v2 type=io.containerd.internal.v1
+time="2026-11-06T07:24:40.568847274Z" level=info msg="loading plugin \"io.containerd.ttrpc.v1.task\"..." runtime=io.containerd.runc.v2 type=io.containerd.ttrpc.v1
+time="2026-11-06T07:24:40.569499427Z" level=info msg="starting signal loop" namespace=moby path=/run/docker/containerd/daemon/io.containerd.runtime.v2.task/moby/b876fee703f11a57832d4a750e1e8b48dcdc747a3de058a182b083d1188503bd pid=10907 runtime=io.containerd.runc.v2
+time="2026-11-06T07:25:53.606968512Z" level=info msg="ignoring event" container=b876fee703f11a57832d4a750e1e8b48dcdc747a3de058a182b083d1188503bd module=libcontainerd namespace=moby topic=/tasks/delete type="*events.TaskDelete"
+time="2026-11-06T07:25:53.606735869Z" level=info msg="shim disconnected" id=b876fee703f11a57832d4a750e1e8b48dcdc747a3de058a182b083d1188503bd
+time="2026-11-06T07:25:53.608410495Z" level=warning msg="cleaning up after shim disconnected" id=b876fee703f11a57832d4a750e1e8b48dcdc747a3de058a182b083d1188503bd namespace=moby
+time="2026-11-06T07:25:53.608431894Z" level=info msg="cleaning up dead shim"
+time="2026-11-06T07:25:54.021498940Z" level=warning msg="cleanup warnings time=\"2026-11-06T07:25:54Z\" level=info msg=\"starting signal loop\" namespace=moby pid=16217 runtime=io.containerd.runc.v2\n"
+time="2026-11-06T07:26:46.201760106Z" level=info msg="loading plugin \"io.containerd.event.v1.publisher\"..." runtime=io.containerd.runc.v2 type=io.containerd.event.v1
+time="2026-11-06T07:26:46.201889645Z" level=info msg="loading plugin \"io.containerd.internal.v1.shutdown\"..." runtime=io.containerd.runc.v2 type=io.containerd.internal.v1
+time="2026-11-06T07:26:46.201900194Z" level=info msg="loading plugin \"io.containerd.ttrpc.v1.task\"..." runtime=io.containerd.runc.v2 type=io.containerd.ttrpc.v1
+time="2026-11-06T07:26:46.301191717Z" level=info msg="starting signal loop" namespace=moby path=/run/docker/containerd/daemon/io.containerd.runtime.v2.task/moby/f408f8c2d9ea072fab9e763bd93f0c5571397ac9b35159aac465c778e5c7baa3 pid=20231 runtime=io.containerd.runc.v2
+time="2026-11-06T07:32:19.826058540Z" level=info msg="ignoring event" container=f408f8c2d9ea072fab9e763bd93f0c5571397ac9b35159aac465c778e5c7baa3 module=libcontainerd namespace=moby topic=/tasks/delete type="*events.TaskDelete"
+time="2026-11-06T07:32:19.925713388Z" level=info msg="shim disconnected" id=f408f8c2d9ea072fab9e763bd93f0c5571397ac9b35159aac465c778e5c7baa3
+time="2026-11-06T07:32:20.128259187Z" level=warning msg="cleaning up after shim disconnected" id=f408f8c2d9ea072fab9e763bd93f0c5571397ac9b35159aac465c778e5c7baa3 namespace=moby
+time="2026-11-06T07:32:20.128292334Z" level=info msg="cleaning up dead shim"
+time="2026-11-06T07:32:21.353818441Z" level=warning msg="cleanup warnings time=\"2026-11-06T07:32:21Z\" level=info msg=\"starting signal loop\" namespace=moby pid=13479 runtime=io.containerd.runc.v2\n"
+time="2026-11-06T07:35:47.819675367Z" level=info msg="loading plugin \"io.containerd.event.v1.publisher\"..." runtime=io.containerd.runc.v2 type=io.containerd.event.v1
+time="2026-11-06T07:35:47.821589700Z" level=info msg="loading plugin \"io.containerd.internal.v1.shutdown\"..." runtime=io.containerd.runc.v2 type=io.containerd.internal.v1
+time="2026-11-06T07:35:47.821603596Z" level=info msg="loading plugin \"io.containerd.ttrpc.v1.task\"..." runtime=io.containerd.runc.v2 type=io.containerd.ttrpc.v1
+time="2026-11-06T07:35:47.822034835Z" level=info msg="starting signal loop" namespace=moby path=/run/docker/containerd/daemon/io.containerd.runtime.v2.task/moby/66ff8a906332c927ca6c4e53109b84af09cb098c79801157316b21c6bd913930 pid=28717 runtime=io.containerd.runc.v2
+time="2026-11-06T07:35:52.759242083Z" level=info msg="ignoring event" container=66ff8a906332c927ca6c4e53109b84af09cb098c79801157316b21c6bd913930 module=libcontainerd namespace=moby topic=/tasks/delete type="*events.TaskDelete"
+time="2026-11-06T07:35:52.759561498Z" level=info msg="shim disconnected" id=66ff8a906332c927ca6c4e53109b84af09cb098c79801157316b21c6bd913930
+time="2026-11-06T07:35:52.760083210Z" level=warning msg="cleaning up after shim disconnected" id=66ff8a906332c927ca6c4e53109b84af09cb098c79801157316b21c6bd913930 namespace=moby
+time="2026-11-06T07:35:52.760094061Z" level=info msg="cleaning up dead shim"
+time="2026-11-06T07:35:52.768827286Z" level=warning msg="cleanup warnings time=\"2026-11-06T07:35:52Z\" level=info msg=\"starting signal loop\" namespace=moby pid=29146 runtime=io.containerd.runc.v2\n"
+time="2026-11-06T07:35:53.459339698Z" level=info msg="loading plugin \"io.containerd.event.v1.publisher\"..." runtime=io.containerd.runc.v2 type=io.containerd.event.v1
+time="2026-11-06T07:35:53.459546470Z" level=info msg="loading plugin \"io.containerd.internal.v1.shutdown\"..." runtime=io.containerd.runc.v2 type=io.containerd.internal.v1
+time="2026-11-06T07:35:53.459566409Z" level=info msg="loading plugin \"io.containerd.ttrpc.v1.task\"..." runtime=io.containerd.runc.v2 type=io.containerd.ttrpc.v1
+time="2026-11-06T07:35:53.460129765Z" level=info msg="starting signal loop" namespace=moby path=/run/docker/containerd/daemon/io.containerd.runtime.v2.task/moby/a4247f5e37196bbf449c89fdf56becc699a1b1f2e96b34216067d754083924be pid=29313 runtime=io.containerd.runc.v2
+time="2026-11-06T07:35:53.730693413Z" level=info msg="shim disconnected" id=a4247f5e37196bbf449c89fdf56becc699a1b1f2e96b34216067d754083924be
+time="2026-11-06T07:35:53.730770356Z" level=warning msg="cleaning up after shim disconnected" id=a4247f5e37196bbf449c89fdf56becc699a1b1f2e96b34216067d754083924be namespace=moby
+time="2026-11-06T07:35:53.730781186Z" level=info msg="cleaning up dead shim"
+time="2026-11-06T07:35:53.731008693Z" level=info msg="ignoring event" container=a4247f5e37196bbf449c89fdf56becc699a1b1f2e96b34216067d754083924be module=libcontainerd namespace=moby topic=/tasks/delete type="*events.TaskDelete"
+time="2026-11-06T07:35:53.740248555Z" level=warning msg="cleanup warnings time=\"2026-11-06T07:35:53Z\" level=info msg=\"starting signal loop\" namespace=moby pid=29372 runtime=io.containerd.runc.v2\n"
+time="2026-11-06T07:35:53.937295230Z" level=info msg="Layer sha256:04fcd5971af48d775cb90e6bdd209d07774612706384e25f9d66ce63b6114975 cleaned up"
+time="2026-11-06T07:35:54.125430475Z" level=info msg="Layer sha256:04fcd5971af48d775cb90e6bdd209d07774612706384e25f9d66ce63b6114975 cleaned up"
+time="2026-11-06T07:35:54.291480050Z" level=info msg="Layer sha256:04fcd5971af48d775cb90e6bdd209d07774612706384e25f9d66ce63b6114975 cleaned up"
+time="2026-11-06T07:38:10.986410180Z" level=info msg="loading plugin \"io.containerd.event.v1.publisher\"..." runtime=io.containerd.runc.v2 type=io.containerd.event.v1
+time="2026-11-06T07:38:10.986670785Z" level=info msg="loading plugin \"io.containerd.internal.v1.shutdown\"..." runtime=io.containerd.runc.v2 type=io.containerd.internal.v1
+time="2026-11-06T07:38:10.986681586Z" level=info msg="loading plugin \"io.containerd.ttrpc.v1.task\"..." runtime=io.containerd.runc.v2 type=io.containerd.ttrpc.v1
+time="2026-11-06T07:38:10.987062807Z" level=info msg="starting signal loop" namespace=moby path=/run/docker/containerd/daemon/io.containerd.runtime.v2.task/moby/5a86b6a256ad8a71800565dccc66a1b237dae2196c30ce25cff0b24d781dd875 pid=7475 runtime=io.containerd.runc.v2
+time="2026-11-06T07:38:22.528006190Z" level=info msg="ignoring event" container=5a86b6a256ad8a71800565dccc66a1b237dae2196c30ce25cff0b24d781dd875 module=libcontainerd namespace=moby topic=/tasks/delete type="*events.TaskDelete"
+time="2026-11-06T07:38:22.529808450Z" level=info msg="shim disconnected" id=5a86b6a256ad8a71800565dccc66a1b237dae2196c30ce25cff0b24d781dd875
+time="2026-11-06T07:38:22.530146715Z" level=warning msg="cleaning up after shim disconnected" id=5a86b6a256ad8a71800565dccc66a1b237dae2196c30ce25cff0b24d781dd875 namespace=moby
+time="2026-11-06T07:38:22.530173792Z" level=info msg="cleaning up dead shim"
+time="2026-11-06T07:38:22.539943866Z" level=warning msg="cleanup warnings time=\"2026-11-06T07:38:22Z\" level=info msg=\"starting signal loop\" namespace=moby pid=8456 runtime=io.containerd.runc.v2\n"
+time="2026-11-06T07:38:27.079221915Z" level=info msg="loading plugin \"io.containerd.event.v1.publisher\"..." runtime=io.containerd.runc.v2 type=io.containerd.event.v1
+time="2026-11-06T07:38:27.079330763Z" level=info msg="loading plugin \"io.containerd.internal.v1.shutdown\"..." runtime=io.containerd.runc.v2 type=io.containerd.internal.v1
+time="2026-11-06T07:38:27.079341028Z" level=info msg="loading plugin \"io.containerd.ttrpc.v1.task\"..." runtime=io.containerd.runc.v2 type=io.containerd.ttrpc.v1
+time="2026-11-06T07:38:27.079503611Z" level=info msg="starting signal loop" namespace=moby path=/run/docker/containerd/daemon/io.containerd.runtime.v2.task/moby/48ec27141d391f3f0e3f6e53f7b63c403a063ef561491c7e0c3a7c2575a40d3a pid=8782 runtime=io.containerd.runc.v2
+time="2026-11-06T07:38:28.078988217Z" level=info msg="shim disconnected" id=48ec27141d391f3f0e3f6e53f7b63c403a063ef561491c7e0c3a7c2575a40d3a
+time="2026-11-06T07:38:28.079062899Z" level=warning msg="cleaning up after shim disconnected" id=48ec27141d391f3f0e3f6e53f7b63c403a063ef561491c7e0c3a7c2575a40d3a namespace=moby
+time="2026-11-06T07:38:28.079073316Z" level=info msg="cleaning up dead shim"
+time="2026-11-06T07:38:28.079369237Z" level=info msg="ignoring event" container=48ec27141d391f3f0e3f6e53f7b63c403a063ef561491c7e0c3a7c2575a40d3a module=libcontainerd namespace=moby topic=/tasks/delete type="*events.TaskDelete"
+time="2026-11-06T07:38:28.087396244Z" level=warning msg="cleanup warnings time=\"2026-11-06T07:38:28Z\" level=info msg=\"starting signal loop\" namespace=moby pid=8926 runtime=io.containerd.runc.v2\n"
+time="2026-11-06T07:38:38.344520455Z" level=warning msg="Security options with `:` as a separator are deprecated and will be completely unsupported in 17.04, use `=` instead."
+time="2026-11-06T07:38:38.816505701Z" level=info msg="loading plugin \"io.containerd.event.v1.publisher\"..." runtime=io.containerd.runc.v2 type=io.containerd.event.v1
+time="2026-11-06T07:38:38.816708650Z" level=info msg="loading plugin \"io.containerd.internal.v1.shutdown\"..." runtime=io.containerd.runc.v2 type=io.containerd.internal.v1
+time="2026-11-06T07:38:38.816719806Z" level=info msg="loading plugin \"io.containerd.ttrpc.v1.task\"..." runtime=io.containerd.runc.v2 type=io.containerd.ttrpc.v1
+time="2026-11-06T07:38:38.816956299Z" level=info msg="starting signal loop" namespace=moby path=/run/docker/containerd/daemon/io.containerd.runtime.v2.task/moby/f4467cdaa698655084f4b9b5681a2eee9e3dc10ee2ee11bf80ae83a9f109c2cf pid=9800 runtime=io.containerd.runc.v2
+time="2026-11-06T07:39:00.100767418Z" level=info msg="Attempting next endpoint for pull after error: denied: 🚫 👀-> https://github.com/DaoCloud/public-image-mirror/issues/2328 🔗 这镜像不在白名单. this image is not in the allowlist."
+time="2026-11-06T07:39:00.208198042Z" level=warning msg="Error getting v2 registry: Get \"https://registry-1.docker.io/v2/\": EOF"
+time="2026-11-06T07:39:00.208265138Z" level=info msg="Attempting next endpoint for pull after error: Get \"https://registry-1.docker.io/v2/\": EOF"
+time="2026-11-06T07:39:00.209989481Z" level=error msg="Handler for POST /v1.41/images/create returned error: Get \"https://registry-1.docker.io/v2/\": EOF"
+time="2026-11-06T07:39:13.763429882Z" level=info msg="Attempting next endpoint for pull after error: denied: 🚫 👀-> https://github.com/DaoCloud/public-image-mirror/issues/2328 🔗 这镜像不在白名单. this image is not in the allowlist."
+time="2026-11-06T07:39:23.765579702Z" level=warning msg="Error getting v2 registry: Get \"https://registry-1.docker.io/v2/\": net/http: TLS handshake timeout"
+time="2026-11-06T07:39:23.765707449Z" level=info msg="Attempting next endpoint for pull after error: Get \"https://registry-1.docker.io/v2/\": net/http: TLS handshake timeout"
+time="2026-11-06T07:39:23.767115677Z" level=error msg="Handler for POST /v1.41/images/create returned error: Get \"https://registry-1.docker.io/v2/\": net/http: TLS handshake timeout"
+time="2026-11-06T07:39:34.337370548Z" level=warning msg="Security options with `:` as a separator are deprecated and will be completely unsupported in 17.04, use `=` instead."
+time="2026-11-06T07:39:35.010485533Z" level=info msg="loading plugin \"io.containerd.event.v1.publisher\"..." runtime=io.containerd.runc.v2 type=io.containerd.event.v1
+time="2026-11-06T07:39:35.010640190Z" level=info msg="loading plugin \"io.containerd.internal.v1.shutdown\"..." runtime=io.containerd.runc.v2 type=io.containerd.internal.v1
+time="2026-11-06T07:39:35.010653796Z" level=info msg="loading plugin \"io.containerd.ttrpc.v1.task\"..." runtime=io.containerd.runc.v2 type=io.containerd.ttrpc.v1
+time="2026-11-06T07:39:35.010956079Z" level=info msg="starting signal loop" namespace=moby path=/run/docker/containerd/daemon/io.containerd.runtime.v2.task/moby/541627bf11a6d328dfa43fec981e6cd272754d685f73d4847541bba5bcb8ff85 pid=14350 runtime=io.containerd.runc.v2
+time="2026-11-06T07:39:45.178387018Z" level=info msg="ignoring event" container=f4467cdaa698655084f4b9b5681a2eee9e3dc10ee2ee11bf80ae83a9f109c2cf module=libcontainerd namespace=moby topic=/tasks/delete type="*events.TaskDelete"
+time="2026-11-06T07:39:45.178793296Z" level=info msg="shim disconnected" id=f4467cdaa698655084f4b9b5681a2eee9e3dc10ee2ee11bf80ae83a9f109c2cf
+time="2026-11-06T07:39:45.179120418Z" level=warning msg="cleaning up after shim disconnected" id=f4467cdaa698655084f4b9b5681a2eee9e3dc10ee2ee11bf80ae83a9f109c2cf namespace=moby
+time="2026-11-06T07:39:45.179142790Z" level=info msg="cleaning up dead shim"
+time="2026-11-06T07:39:45.188694840Z" level=warning msg="cleanup warnings time=\"2026-11-06T07:39:45Z\" level=info msg=\"starting signal loop\" namespace=moby pid=15265 runtime=io.containerd.runc.v2\n"
+time="2026-11-06T07:39:45.476268733Z" level=info msg="ignoring event" container=541627bf11a6d328dfa43fec981e6cd272754d685f73d4847541bba5bcb8ff85 module=libcontainerd namespace=moby topic=/tasks/delete type="*events.TaskDelete"
+time="2026-11-06T07:39:45.477458842Z" level=info msg="shim disconnected" id=541627bf11a6d328dfa43fec981e6cd272754d685f73d4847541bba5bcb8ff85
+time="2026-11-06T07:39:45.477534298Z" level=warning msg="cleaning up after shim disconnected" id=541627bf11a6d328dfa43fec981e6cd272754d685f73d4847541bba5bcb8ff85 namespace=moby
+time="2026-11-06T07:39:45.477543769Z" level=info msg="cleaning up dead shim"
+time="2026-11-06T07:39:45.487153273Z" level=warning msg="cleanup warnings time=\"2026-11-06T07:39:45Z\" level=info msg=\"starting signal loop\" namespace=moby pid=15374 runtime=io.containerd.runc.v2\n"
+time="2026-11-06T07:40:55.154599018Z" level=warning msg="Security options with `:` as a separator are deprecated and will be completely unsupported in 17.04, use `=` instead."
+time="2026-11-06T07:40:55.229225502Z" level=info msg="loading plugin \"io.containerd.event.v1.publisher\"..." runtime=io.containerd.runc.v2 type=io.containerd.event.v1
+time="2026-11-06T07:40:55.229432537Z" level=info msg="loading plugin \"io.containerd.internal.v1.shutdown\"..." runtime=io.containerd.runc.v2 type=io.containerd.internal.v1
+time="2026-11-06T07:40:55.229443694Z" level=info msg="loading plugin \"io.containerd.ttrpc.v1.task\"..." runtime=io.containerd.runc.v2 type=io.containerd.ttrpc.v1
+time="2026-11-06T07:40:55.231973300Z" level=info msg="starting signal loop" namespace=moby path=/run/docker/containerd/daemon/io.containerd.runtime.v2.task/moby/300e6f5058548b51f3958ad9f6e13e0259d8cb182f7d0b6db11b0facef10decf pid=20819 runtime=io.containerd.runc.v2

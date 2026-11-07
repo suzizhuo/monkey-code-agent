@@ -1,0 +1,4 @@
+capability profiles:
+  strict   install off memory 512m cpus 1.0 pids 128  user nobody
+  tooled   install on  memory 4g   cpus 2.0 pids 512  user 0:0
+default: tooled

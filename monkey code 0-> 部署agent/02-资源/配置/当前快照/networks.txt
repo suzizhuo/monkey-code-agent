@@ -1,0 +1,5 @@
+NETWORK ID     NAME         DRIVER    SCOPE
+e718e32a31ac   bridge       bridge    local
+c30266fc9289   host         host      local
+23ab7ed0b269   isolis-net   bridge    local
+ad4f8489d1b5   none         null      local

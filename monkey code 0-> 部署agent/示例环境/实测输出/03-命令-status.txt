@@ -1,0 +1,4 @@
+* default              running  127.0.0.1:18080  tooled     monkeycode-basic/deepseek-flash
+isolation[tooled]: root writable, tmpfs /tmp 512m, workspace /work 2g, pids 512, memory 4g, cpus 2.0, user 0:0, cap-drop ALL, caps CHOWN,DAC_OVERRIDE,FOWNER,SETUID,SETGID,SETFCAP, no-new-privileges, install on, no host mounts, no docker socket
+context budget: 900000 tokens of 1000000 upstream max, turns 400, message cap 900000 chars
+agent source: local

@@ -1,0 +1,31 @@
+{
+  "default_profile": "tooled",
+  "model": "",
+  "prompt_file": "agent-prompt.md",
+  "profiles": {
+    "tooled": {
+      "memory": "4g",
+      "cpus": "2.0",
+      "pids": "512",
+      "workspace": "2g",
+      "tmp": "512m",
+      "shm": "512m",
+      "user": "0:0",
+      "caps": ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETUID", "SETGID", "SETFCAP"],
+      "read_only": false,
+      "install": true
+    },
+    "strict": {
+      "memory": "512m",
+      "cpus": "1.0",
+      "pids": "128",
+      "workspace": "512m",
+      "tmp": "64m",
+      "shm": "64m",
+      "user": "nobody",
+      "caps": [],
+      "read_only": true,
+      "install": false
+    }
+  }
+}

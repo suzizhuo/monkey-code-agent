@@ -1,0 +1,40 @@
+[
+    {
+        "Name": "isolis-net",
+        "Id": "23ab7ed0b269c91733ab1eb8caf2b09d0d295a4a372926f4200448cf876e29c6",
+        "Created": "2026-11-06T07:15:31.270361534Z",
+        "Scope": "local",
+        "Driver": "bridge",
+        "EnableIPv6": false,
+        "IPAM": {
+            "Driver": "default",
+            "Options": {},
+            "Config": [
+                {
+                    "Subnet": "172.18.0.0/16",
+                    "Gateway": "172.18.0.1"
+                }
+            ]
+        },
+        "Internal": false,
+        "Attachable": false,
+        "Ingress": false,
+        "ConfigFrom": {
+            "Network": ""
+        },
+        "ConfigOnly": false,
+        "Containers": {
+            "300e6f5058548b51f3958ad9f6e13e0259d8cb182f7d0b6db11b0facef10decf": {
+                "Name": "isolis-default",
+                "EndpointID": "25f18a8f2fcf1acaa3329b3ed0eb7540a58fe56031dbaba1b2277cbd91398d89",
+                "MacAddress": "02:42:ac:12:00:02",
+                "IPv4Address": "172.18.0.2/16",
+                "IPv6Address": ""
+            }
+        },
+        "Options": {
+            "com.docker.network.bridge.enable_icc": "false"
+        },
+        "Labels": {}
+    }
+]

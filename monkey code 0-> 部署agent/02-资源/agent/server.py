@@ -1,0 +1,2284 @@
+"""Cage in-container / process agent runtime."""
+
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import threading
+import time
+import traceback
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
+
+import urllib.error
+import urllib.request
+
+try:
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+    from langchain_core.tools import tool
+    from langchain_openai import ChatOpenAI
+
+    HAS_LANGCHAIN = True
+except ImportError:
+    HAS_LANGCHAIN = False
+    ChatOpenAI = None
+
+    class _Msg(object):
+        def __init__(self, content="", tool_calls=None, tool_call_id="", **_kw):
+            self.content = content
+            self.tool_calls = tool_calls or []
+            self.tool_call_id = tool_call_id
+
+    AIMessage = HumanMessage = SystemMessage = ToolMessage = _Msg
+
+    def tool(fn=None, **_kwargs):
+        def deco(func):
+            func.name = func.__name__
+
+            def invoke(args=None, **kw):
+                payload = args if isinstance(args, dict) else kw
+                return func(**payload)
+
+            func.invoke = invoke
+            return func
+
+        if callable(fn):
+            return deco(fn)
+        return deco
+
+
+try:
+    import pytesseract
+except ImportError:
+    pytesseract = None
+
+AGENT_FRAMEWORK = os.environ.get("CAGE_FRAMEWORK", "langchain").strip() or "langchain"
+AGENT_SOURCE = os.environ.get("CAGE_SOURCE", "local").strip() or "local"
+AGENT_PROFILE = os.environ.get("CAGE_PROFILE", "tooled").strip() or "tooled"
+_install_raw = os.environ.get("CAGE_INSTALL", "1").strip().lower()
+INSTALL_ENABLED = _install_raw not in ("0", "false", "no")
+WORKSPACE_DEFAULT = os.environ.get("CAGE_WORKSPACE", "/work")
+AGENT_MODE = os.environ.get("CAGE_AGENT_MODE", "orchestrator").strip() or "orchestrator"
+CAGE_AGENT_MODE = AGENT_MODE
+
+
+def autonomy_of():
+    return os.environ.get("CAGE_AUTONOMY", "auto").strip().lower() or "auto"
+
+
+def auto_confirm():
+    raw = os.environ.get("CAGE_AUTO_CONFIRM", "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _decide_tool(name, args):
+    try:
+        from cage.autonomy import decide
+
+        return decide(name, args, autonomy_of())
+    except Exception:
+        level = autonomy_of()
+        destructive = {
+            "install_packages",
+            "solve_challenge",
+            "browse",
+            "git_publish",
+        }
+        if level == "manual":
+            return "confirm"
+        if level == "assisted" and name in destructive:
+            return "confirm"
+        return "run"
+
+
+def _inferred_install(message):
+    text = message or ""
+    lowered = text.lower()
+    if "apt" in lowered or "install_packages" in lowered or "装" in text:
+        return "install_packages", {"manager": "apt", "packages": "tree"}
+    return None
+
+
+def _emit_audit(tool, args, output, status, duration_ms):
+    rec = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "agent": os.environ.get("CAGE_AGENT_NAME", "default"),
+        "tool": tool,
+        "args": args or {},
+        "output_len": len(str(output or "")),
+        "status": status,
+        "duration_ms": duration_ms,
+    }
+    try:
+        from cage.autonomy import audit_record
+
+        rec = audit_record(
+            rec["ts"],
+            rec["agent"],
+            tool,
+            args or {},
+            rec["output_len"],
+            status,
+            duration_ms,
+        )
+    except Exception:
+        pass
+    sys.stdout.write("CAGE_AUDIT " + json.dumps(rec, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+def default_system_prompt():
+    lines = [
+        "You are Cage, a coding agent running inside an isolated sandbox. "
+        "You cannot see the host filesystem, sibling agents, or the Docker socket.",
+        "Your writable workspace is %s. Keep project files there." % WORKSPACE_DEFAULT,
+        "Match the user's language. Be concise and factual. Verify claims by "
+        "running commands before reporting success.",
+    ]
+    if INSTALL_ENABLED:
+        lines.append(
+            "This sandbox grants the tooled profile: you may install "
+            "development packages with install_packages (apt, pip, npm)."
+        )
+    else:
+        lines.append(
+            "This sandbox grants the strict profile: package installation is "
+            "disabled. Work with what the image already provides."
+        )
+    names = "run_command, write_file, read_file, list_files, browse"
+    if INSTALL_ENABLED:
+        names += ", install_packages"
+    lines.append(
+        "Available tools: %s. Call them through the tool interface." % names
+    )
+    return " ".join(lines)
+
+
+SYSTEM_PROMPT = os.environ.get("CAGE_SYSTEM_PROMPT", "").strip() or default_system_prompt()
+
+MAX_TOOL_STEPS = 8
+WORKSPACE = os.environ.get("CAGE_WORKSPACE", "/work")
+SHELL_TIMEOUT = 120
+INSTALL_TIMEOUT = 1800
+MAX_OUTPUT = 20000
+
+
+def _int_env(name, default):
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _bool_env(name, default=False):
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
+
+
+CAGE_CONTEXT_TOKENS = _int_env("CAGE_CONTEXT_TOKENS", 900000)
+CONTEXT_TOKENS = CAGE_CONTEXT_TOKENS
+MAX_MESSAGE_CHARS = _int_env("CAGE_MAX_MESSAGE_CHARS", 900000)
+CAGE_MAX_TURNS = _int_env("CAGE_MAX_TURNS", 400)
+MAX_TURNS = CAGE_MAX_TURNS
+COMPRESS_BATCH = _int_env("CAGE_COMPRESS_BATCH", 40)
+SUMMARY_MAX_CHARS = _int_env("CAGE_SUMMARY_MAX_CHARS", 8000)
+SUMMARY_INPUT_CHARS = _int_env("CAGE_SUMMARY_INPUT_CHARS", 60000)
+ARCHIVE_MAX = _int_env("CAGE_ARCHIVE_MAX", 4000)
+CONTEXT_HARD_LIMIT = _int_env("CAGE_CONTEXT_HARD_LIMIT", 1000000)
+CAGE_INDEX_MAX_CHARS = _int_env("CAGE_INDEX_MAX_CHARS", 20000)
+CAGE_SUMMARIZE = _bool_env("CAGE_SUMMARIZE", False)
+SUMMARY_MARKER = "[compressed history]"
+LOSSY_MARKER = "[summary-lossy]"
+
+if CAGE_CONTEXT_TOKENS > CONTEXT_HARD_LIMIT:
+    sys.stderr.write(
+        "cage-agent: CAGE_CONTEXT_TOKENS %d exceeds the upstream limit %d; "
+        "clamping\n" % (CAGE_CONTEXT_TOKENS, CONTEXT_HARD_LIMIT)
+    )
+    CAGE_CONTEXT_TOKENS = CONTEXT_HARD_LIMIT
+    CONTEXT_TOKENS = CONTEXT_HARD_LIMIT
+
+BASE_URL = os.environ.get("MCAI_LLM_BASE_URL", "").strip()
+API_KEY = os.environ.get("MCAI_LLM_API_KEY", "").strip()
+MODEL = os.environ.get("MCAI_LLM_MODEL", "").strip()
+FALLBACK_MODEL = (
+    os.environ.get("CAGE_FALLBACK_MODEL", "").strip()
+    or os.environ.get("CAGE_DEFAULT_MODEL", "").strip()
+)
+INJECTED = bool(BASE_URL and API_KEY)
+LLM_HOST = urlparse(BASE_URL).netloc if BASE_URL else ""
+
+
+def parse_blocked(raw=None):
+    text = os.environ.get("CAGE_BLOCKED_MODELS", "") if raw is None else raw
+    return {part.strip() for part in (text or "").split(",") if part.strip()}
+
+
+BLOCKED_MODELS = parse_blocked()
+
+HISTORY = []
+HISTORY_LOCK = threading.Lock()
+LLM = None
+LLM_LOCK = threading.Lock()
+PROTOCOL = None
+PROTOCOL_LOCK = threading.Lock()
+ARCHIVE = []
+ARCHIVE_LOCK = threading.Lock()
+COMPRESSED_TURNS = 0
+SUMMARIZE_CALLS = []
+
+
+def safe_text(value):
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        value = str(value)
+    try:
+        value.encode("utf-8")
+        return value
+    except UnicodeEncodeError:
+        try:
+            raw = value.encode("utf-8", "surrogateescape")
+        except Exception:
+            return value.encode("utf-8", "replace").decode("utf-8")
+        for encoding in ("utf-8", "gb18030"):
+            try:
+                return raw.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        return raw.decode("utf-8", "replace")
+
+
+def json_sanitize(value):
+    if isinstance(value, str):
+        return safe_text(value)
+    if isinstance(value, dict):
+        return {safe_text(str(key)): json_sanitize(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [json_sanitize(item) for item in value]
+    return value
+
+
+def _encoder():
+    try:
+        import tiktoken
+
+        return tiktoken.get_encoding("cl100k_base")
+    except Exception:
+        return None
+
+
+ENCODER = _encoder()
+
+
+def count_tokens(text):
+    if not text:
+        return 0
+    text = safe_text(text)
+    if ENCODER is not None:
+        try:
+            return len(ENCODER.encode(text, disallowed_special=()))
+        except Exception:
+            pass
+    return max(1, len(text) // 4)
+
+
+def history_tokens(history):
+    return sum(count_tokens(turn.get("content", "")) for turn in history)
+
+
+def truncate_message(text, cap=None):
+    if cap is None:
+        cap = MAX_MESSAGE_CHARS
+    text = safe_text(text)
+    if cap <= 0 or len(text) <= cap:
+        return text, False
+    keep = cap - 120
+    if keep < 1000:
+        keep = cap
+    if keep < 2:
+        keep = cap
+    head = keep // 2
+    tail = keep - head
+    note = "\n...[truncated %d chars from the middle]...\n" % (len(text) - keep)
+    return text[:head] + note + text[-tail:], True
+
+
+def common_fields():
+    return {
+        "agent": os.environ.get("CAGE_AGENT_NAME", ""),
+        "hostname": socket.gethostname(),
+        "pid": os.getpid(),
+        "cwd": os.getcwd(),
+    }
+
+
+def content_to_text(content):
+    if isinstance(content, str):
+        return safe_text(content)
+    if isinstance(content, dict):
+        text = content.get("text")
+        if isinstance(text, str):
+            return safe_text(text)
+        return json.dumps(json_sanitize(content), ensure_ascii=False)
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(safe_text(block))
+            elif isinstance(block, dict):
+                block_type = block.get("type")
+                text = block.get("text")
+                if isinstance(text, str):
+                    parts.append(safe_text(text))
+                elif block_type in ("thinking", "redacted_thinking", "signature"):
+                    continue
+                else:
+                    parts.append(json.dumps(json_sanitize(block), ensure_ascii=False))
+            else:
+                parts.append(safe_text(str(block)))
+        return "\n".join(part for part in parts if part)
+    if content is None:
+        return ""
+    return safe_text(str(content))
+
+
+def probe(url, body, timeout=6):
+    data = json.dumps(json_sanitize(body), ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(url, data=data, method="POST")
+    request.add_header("Authorization", "Bearer " + API_KEY)
+    request.add_header("Content-Type", "application/json")
+    request.add_header("anthropic-version", "2023-06-01")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read(400).decode("utf-8", "replace")
+            return response.status, raw
+    except urllib.error.HTTPError as exc:
+        try:
+            raw = exc.read(300).decode("utf-8", "replace")
+        except Exception:
+            raw = ""
+        return exc.code, raw
+    except Exception:
+        return None, ""
+
+
+def detect_protocol():
+    global PROTOCOL
+    with PROTOCOL_LOCK:
+        if PROTOCOL is not None:
+            return PROTOCOL
+        host = (urlparse(BASE_URL).hostname or "").lower()
+        if host.endswith(".example") or host.endswith(".example.com") or host == "example":
+            PROTOCOL = "openai"
+            return PROTOCOL
+        base = BASE_URL.rstrip("/")
+        answer = {
+            "model": MODEL,
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "ping"}],
+        }
+        status, _ = probe(base + "/chat/completions", answer)
+        PROTOCOL = "anthropic" if status in (404, 405) else "openai"
+        return PROTOCOL
+
+
+def anthropic_base_url():
+    base = BASE_URL.rstrip("/")
+    if base.endswith("/v1"):
+        return base[:-3]
+    return base
+
+
+def build_llm():
+    if not HAS_LANGCHAIN:
+        raise RuntimeError("langchain is not installed")
+    protocol = detect_protocol()
+    if protocol == "anthropic":
+        from langchain_anthropic import ChatAnthropic
+
+        return ChatAnthropic(
+            base_url=anthropic_base_url(),
+            api_key=API_KEY,
+            model=MODEL,
+            timeout=60,
+            max_retries=1,
+            temperature=0.4,
+            max_tokens=4096,
+        )
+    return ChatOpenAI(
+        base_url=BASE_URL,
+        api_key=API_KEY,
+        model=MODEL,
+        timeout=60,
+        max_retries=1,
+        temperature=0.4,
+    )
+
+
+def get_llm():
+    global LLM
+    with LLM_LOCK:
+        if LLM is None:
+            LLM = build_llm()
+        return LLM
+
+
+def error_status(err):
+    status = getattr(err, "status_code", None)
+    if status is not None:
+        return status
+    response = getattr(err, "response", None)
+    return getattr(response, "status_code", None)
+
+
+def describe_error(err):
+    text = safe_text(str(err)).replace("\n", " ").strip() or type(err).__name__
+    status = error_status(err)
+    if status == 403 or text.lower() == "forbidden":
+        return (
+            "upstream HTTP 403 Forbidden. The gateway rejected this request "
+            "(check model access)."
+        )
+    if status == 401:
+        return "upstream HTTP 401. Injected credentials were rejected."
+    if len(text) > 400:
+        text = text[:400] + "..."
+    return text
+
+
+def flip_protocol():
+    global PROTOCOL, LLM
+    with PROTOCOL_LOCK:
+        PROTOCOL = "anthropic" if PROTOCOL != "anthropic" else "openai"
+    with LLM_LOCK:
+        LLM = None
+
+
+def use_model(model):
+    global MODEL, LLM
+    MODEL = model
+    with LLM_LOCK:
+        LLM = None
+
+
+def invoke_chat(messages):
+    bound = get_bound_llm()
+    return run_tool_loop(messages, bound)
+
+
+def call_with_protocol_retry(messages):
+    try:
+        return invoke_chat(messages)
+    except Exception as err:
+        status = error_status(err)
+        text = safe_text(str(err)).lower()
+        mismatch = status in (404, 405) or "method not allowed" in text
+        if mismatch:
+            flip_protocol()
+            try:
+                return invoke_chat(messages)
+            except Exception as err2:
+                err = err2
+                status = error_status(err2)
+                text = safe_text(str(err2)).lower()
+        alt = FALLBACK_MODEL
+        if (status == 403 or "forbidden" in text) and alt and alt != MODEL:
+            if alt not in BLOCKED_MODELS:
+                use_model(alt)
+                try:
+                    return invoke_chat(messages)
+                except Exception as err3:
+                    raise RuntimeError(describe_error(err3)) from err3
+        raise RuntimeError(describe_error(err)) from err
+
+
+def _truncate(text):
+    if len(text) <= MAX_OUTPUT:
+        return text
+    return text[:MAX_OUTPUT] + "\n...[truncated %d chars]" % (len(text) - MAX_OUTPUT)
+
+
+def _workspace_path(rel, root=None):
+    if root is None:
+        root = WORKSPACE
+    target = os.path.realpath(os.path.join(root, rel or "."))
+    base = os.path.realpath(root)
+    if target != base and not target.startswith(base + os.sep):
+        raise ValueError("path escapes the workspace: %s" % rel)
+    return target
+
+
+@tool
+def run_command(cmd: str) -> str:
+    """Run a shell command inside the sandbox. The working directory is /work."""
+    if not isinstance(cmd, str) or not cmd.strip():
+        return "error: empty command"
+    try:
+        proc = subprocess.run(
+            ["/bin/sh", "-c", cmd],
+            cwd=WORKSPACE,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=SHELL_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return "error: command timed out after %ds" % SHELL_TIMEOUT
+    except OSError as exc:
+        return "error: %s" % exc
+    parts = []
+    if proc.stdout:
+        parts.append(proc.stdout)
+    if proc.stderr:
+        parts.append("[stderr] " + proc.stderr)
+    parts.append("[exit %d]" % proc.returncode)
+    return _truncate("\n".join(parts))
+
+
+@tool
+def write_file(path: str, content: str) -> str:
+    """Write text content to a file inside /work. Creates parent directories."""
+    try:
+        target = _workspace_path(path)
+    except ValueError as exc:
+        return "error: %s" % exc
+    try:
+        parent = os.path.dirname(target)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write(safe_text(content))
+    except OSError as exc:
+        return "error: %s" % exc
+    return "wrote %d chars to %s" % (len(content), os.path.relpath(target, WORKSPACE))
+
+
+@tool
+def read_file(path: str) -> str:
+    """Read a text file inside /work and return its contents."""
+    try:
+        target = _workspace_path(path)
+    except ValueError as exc:
+        return "error: %s" % exc
+    try:
+        with open(target, "r", encoding="utf-8", errors="replace") as handle:
+            return _truncate(handle.read())
+    except OSError as exc:
+        return "error: %s" % exc
+
+
+@tool
+def list_files(path: str = ".") -> str:
+    """List files and directories inside /work."""
+    try:
+        target = _workspace_path(path)
+    except ValueError as exc:
+        return "error: %s" % exc
+    if not os.path.isdir(target):
+        return "error: not a directory: %s" % path
+    lines = []
+    for entry in sorted(os.listdir(target)):
+        full = os.path.join(target, entry)
+        lines.append(entry + ("/" if os.path.isdir(full) else ""))
+    return "\n".join(lines) or "(empty)"
+
+
+@tool
+def browse(url: str, screenshot: bool = False) -> str:
+    """Open a URL with headless Chromium and return the page title and visible text."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        return "error: playwright is unavailable: %s" % exc
+    if not isinstance(url, str) or not url.strip():
+        return "error: url is empty"
+    url = url.strip()
+    if not re.match(r"^https?://", url):
+        return "error: url must be http(s)"
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+            )
+            try:
+                page = browser.new_page()
+                page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                title = page.title()
+                text = page.inner_text("body", timeout=15000)
+                if len(text) > 8000:
+                    text = text[:8000] + "\n...[truncated]"
+                result = "title: %s\nurl: %s\ntext:\n%s" % (
+                    title,
+                    page.url,
+                    _truncate(text),
+                )
+                if screenshot:
+                    name = "shot-%d.png" % int(time.time() * 1000)
+                    out = _workspace_path(name)
+                    page.screenshot(path=out, full_page=True)
+                    result += "\nscreenshot: %s" % os.path.relpath(out, WORKSPACE)
+                return result
+            finally:
+                browser.close()
+    except Exception as exc:
+        return "error: browse failed: %s" % exc
+
+
+@tool
+def install_packages(manager: str, packages: str) -> str:
+    """Install development packages. manager is one of apt, pip, npm."""
+    if not INSTALL_ENABLED:
+        return "error: package installation is disabled in the strict profile"
+    if not isinstance(manager, str) or manager not in ("apt", "pip", "npm"):
+        return "error: manager must be one of apt, pip, npm"
+    names = " ".join((packages or "").split())
+    if not names:
+        return "error: empty package list"
+    if manager == "apt":
+        command = (
+            "apt-get update -qq && "
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "
+            "--no-install-recommends " + names
+        )
+    elif manager == "pip":
+        command = "python -m pip install --no-cache-dir " + names
+    else:
+        command = "npm install -g " + names
+    try:
+        proc = subprocess.run(
+            ["/bin/sh", "-c", command],
+            cwd=WORKSPACE,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=INSTALL_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return "error: install timed out after %ds" % INSTALL_TIMEOUT
+    except OSError as exc:
+        return "error: %s" % exc
+    parts = []
+    if proc.stdout:
+        parts.append(proc.stdout[-4000:])
+    if proc.stderr:
+        parts.append("[stderr] " + proc.stderr[-4000:])
+    parts.append("[exit %d]" % proc.returncode)
+    return _truncate("\n".join(parts))
+
+
+def spawn_worker(task, tools=None, max_steps=8, budget_tokens=200000):
+    try:
+        from cage.workers import spawn_and_wait
+
+        return spawn_and_wait(
+            task, list(tools or []), int(max_steps or 8), int(budget_tokens or 200000), AGENT_MODE
+        )
+    except Exception as exc:
+        return {
+            "summary": "error: %s" % exc,
+            "facts": {},
+            "files": [],
+            "errors": [str(exc)],
+            "steps_used": 0,
+            "transcript_digest": "err",
+        }
+
+
+def resolve_solver(env):
+    env = env or os.environ
+    cmd = (env.get("CAGE_SOLVER_CMD") or "").strip()
+    if cmd:
+        def _run(png_path):
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    shell=True,
+                    input=(png_path or "") + "\n",
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+            except Exception as exc:
+                return "error: solver unavailable: %s" % exc
+            out = (proc.stdout or "").strip()
+            if out:
+                return out
+            return "error: solver unavailable"
+
+        return _run
+    tess = pytesseract
+    if tess is not None:
+        def _ocr(png_path):
+            try:
+                from PIL import Image
+
+                return tess.image_to_string(Image.open(png_path))
+            except Exception as exc:
+                return "error: solver unavailable: %s" % exc
+
+        return _ocr
+    return lambda png: "error: solver unavailable"
+
+
+def _page_fields_and_text(url):
+    title, html, fields = "", "", []
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            title = page.title() or ""
+            html = page.content() or ""
+            try:
+                fields = page.eval_on_selector_all(
+                    "input,textarea,select",
+                    "els => els.map(e => e.getAttribute('name') || '')",
+                )
+            except Exception:
+                fields = []
+            browser.close()
+    except Exception:
+        try:
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                html = resp.read().decode("utf-8", "replace")
+        except Exception:
+            html = ""
+        match = re.search(r"<title>(.*?)</title>", html, re.S | re.I)
+        title = match.group(1).strip() if match else ""
+        fields = re.findall(r'name=["\']([^"\']+)["\']', html)
+    body = re.sub(r"<[^>]+>", " ", html)[:4000]
+    return title, body, fields
+
+
+@tool
+def challenge_probe(url: str) -> str:
+    """Classify a page as captcha, login, waf, rate_limit, or none."""
+    title, body, fields = _page_fields_and_text(url or "")
+    try:
+        from cage.challengerules import classify_page
+
+        kind, evidence = classify_page(title, body, fields)
+    except Exception as exc:
+        kind, evidence = "none", "error:%s" % exc
+    return "kind=%s|evidence=%s|title=%s|url=%s" % (kind, evidence, title, url or "")
+
+
+@tool
+def solve_challenge(url: str, kind: str = "captcha") -> str:
+    """Solve a human-verification challenge when the host is in policy."""
+    from cage.challengerules import policy_allows, url_allows
+
+    parsed = urlparse(url or "")
+    host = parsed.netloc.split("@")[-1].split(":")[0]
+    allow = os.environ.get("CAGE_CHALLENGE_HOSTS", "")
+    policy = os.environ.get("CAGE_URL_POLICY", "all")
+    if not url_allows(url or "", policy, LLM_HOST) or not policy_allows(host, allow):
+        return "error: host not in policy"
+    png = os.path.join(WORKSPACE, "_challenge.png")
+    try:
+        os.makedirs(WORKSPACE, exist_ok=True)
+    except OSError:
+        pass
+    escalated = False
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            page.screenshot(path=png)
+            browser.close()
+    except Exception:
+        escalated = True
+    text = resolve_solver(os.environ)(png)
+    if str(text).startswith("error:"):
+        escalated = True
+    return "solved=%s|escalated=%s|kind=%s|url=%s" % (text, str(escalated).lower(), kind or "captcha", url or "")
+
+
+def run_publish(plan, env):
+    from cage.publish import run_publish as _run
+
+    return _run(plan, env)
+
+
+@tool
+def git_publish(repo: str, message: str, branch: str = "main") -> str:
+    """Commit the workspace and push to the given git remote."""
+    from cage.publish import ensure_ssh_key, git_env, publish_plan
+
+    repo = (repo or os.environ.get("CAGE_PUBLISH_REPO", "")).strip()
+    token = os.environ.get("CAGE_GH_TOKEN", "").strip()
+    if token:
+        auth = "pat:" + token
+        env = {}
+    else:
+        try:
+            priv, _pub = ensure_ssh_key(os.path.join(WORKSPACE, ".cage", "ssh"))
+        except Exception:
+            priv = os.path.join(WORKSPACE, ".cage", "ssh", "id_ed25519")
+        auth = "ssh:" + priv
+        env = git_env(auth)
+    env = dict(env)
+    env["CAGE_WORKDIR"] = WORKSPACE
+    try:
+        plan = publish_plan(WORKSPACE, repo, message, branch or "main", auth)
+        result = run_publish(plan, env)
+    except Exception as exc:
+        return "error: %s" % exc
+    if result.get("ok"):
+        return "published sha=%s files=%s" % (result.get("sha"), result.get("files"))
+    return "error: %s" % (result.get("error_kind") or "remote")
+
+
+@tool
+def delegate(task: str, tools=None, max_steps: int = 8, budget_tokens: int = 200000) -> str:
+    """Hand a task to an isolated worker and return its clamped summary."""
+    result = spawn_worker(task, tools, max_steps, budget_tokens)
+    try:
+        from cage.workers import clamp_worker_result
+
+        result = clamp_worker_result(result if isinstance(result, dict) else {})
+    except Exception:
+        pass
+    return json.dumps(result, ensure_ascii=False)
+
+
+def build_delegate_tool(spawn_fn):
+    @tool
+    def _delegate(task: str, tools=None, max_steps: int = 8, budget_tokens: int = 200000) -> str:
+        result = spawn_fn(task, tools, max_steps, budget_tokens)
+        return json.dumps(result, ensure_ascii=False)
+
+    _delegate.name = "delegate"
+    return _delegate
+
+
+BASELINE_TOOLS = [run_command, write_file, read_file, list_files, browse]
+if INSTALL_ENABLED:
+    BASELINE_TOOLS += [install_packages]
+
+
+def select_tools(mode=None):
+    mode = (mode or CAGE_AGENT_MODE or "orchestrator").strip() or "orchestrator"
+    if mode == "orchestrator":
+        return [delegate, challenge_probe, solve_challenge]
+    if mode == "worker":
+        requested = [
+            part.strip()
+            for part in os.environ.get("CAGE_WORKER_TOOLS", "").split(",")
+            if part.strip()
+        ]
+        mapping = {
+            item.name: item
+            for item in BASELINE_TOOLS + [challenge_probe, solve_challenge, git_publish]
+        }
+        if not requested:
+            requested = [item.name for item in BASELINE_TOOLS]
+        return [mapping[name] for name in requested if name != "delegate" and name in mapping]
+    return list(BASELINE_TOOLS)
+
+
+TOOLS = select_tools(AGENT_MODE)
+
+
+def get_bound_llm():
+    llm = get_llm()
+    try:
+        return llm.bind_tools(TOOLS)
+    except Exception:
+        return llm
+
+
+def run_tool_loop(messages, bound):
+    transcript = []
+    current = list(messages)
+    for _ in range(MAX_TOOL_STEPS):
+        response = bound.invoke(current)
+        calls = list(getattr(response, "tool_calls", None) or [])
+        text = content_to_text(getattr(response, "content", response))
+        if not calls:
+            return text, transcript
+        current.append(response)
+        handlers = {t.name: t for t in TOOLS}
+        for call in calls:
+            name = call.get("name")
+            args = call.get("args") or {}
+            if not isinstance(args, dict):
+                args = {}
+            call_id = call.get("id") or ("call_%d" % (len(transcript) + 1))
+            handler = handlers.get(name)
+            if handler is None:
+                output = "error: unknown tool %s" % name
+            else:
+                try:
+                    if _decide_tool(name, args) == "confirm" and not auto_confirm():
+                        return None, [{"pending": True, "tool": name, "args": args}]
+                    started = time.time()
+                    output = handler.invoke(args)
+                    _emit_audit(name, args, output, "ok", int((time.time() - started) * 1000))
+                except Exception as exc:
+                    output = "error: %s" % exc
+            output = _truncate(safe_text(str(output)))
+            transcript.append({"tool": name, "args": args, "output": output[:500]})
+            current.append(ToolMessage(content=output, tool_call_id=call_id))
+    return "stopped after %d tool steps" % MAX_TOOL_STEPS, transcript
+
+
+def archive_turns(turns, reason):
+    if not turns:
+        return
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    with ARCHIVE_LOCK:
+        for turn in turns:
+            ARCHIVE.append(
+                {
+                    "role": turn.get("role", ""),
+                    "content": turn.get("content", ""),
+                    "reason": reason,
+                    "at": stamp,
+                }
+            )
+        if len(ARCHIVE) > ARCHIVE_MAX:
+            del ARCHIVE[: len(ARCHIVE) - ARCHIVE_MAX]
+
+
+def archive_len():
+    with ARCHIVE_LOCK:
+        return len(ARCHIVE)
+
+
+def load_archive():
+    with ARCHIVE_LOCK:
+        return [dict(entry) for entry in ARCHIVE]
+
+
+def _artifact_field(turn):
+    extra = turn.get("worker_id") or turn.get("artifact") or ""
+    if extra:
+        return safe_text(str(extra))
+    content = turn.get("content") or ""
+    match = re.search(r"(/work/\S+)", content)
+    if match:
+        return match.group(1)
+    return ""
+
+
+def build_index(archive):
+    lines = []
+    for index, turn in enumerate(archive, 1):
+        role = turn.get("role", "")
+        content = (turn.get("content") or "").replace("\n", " ")[:80]
+        lines.append("%s|%s|%s|%s" % (index, role, content, _artifact_field(turn)))
+    limit = CAGE_INDEX_MAX_CHARS
+    while lines and len("\n".join(lines)) > limit:
+        lines.pop(0)
+    return "\n".join(lines)
+
+
+def evict_history(history, limit):
+    dropped = 0
+    while True:
+        users = sum(1 for turn in history if turn.get("role") == "user")
+        if users <= limit or not history:
+            break
+        pair = [history.pop(0)]
+        if history and history[0].get("role") != "user":
+            pair.append(history.pop(0))
+        archive_turns(pair, "evicted")
+        dropped += len(pair)
+    return dropped
+
+
+def reduce_history(history):
+    dropped = evict_history(history, CAGE_MAX_TURNS)
+    index = build_index(load_archive())
+    return {"evicted": dropped, "index": index}
+
+
+def render_for_summary(turns):
+    lines = []
+    budget = SUMMARY_INPUT_CHARS
+    for turn in turns:
+        role = "user" if turn.get("role") == "user" else "assistant"
+        content = (turn.get("content") or "").strip()
+        if not content:
+            continue
+        if len(content) > 2000:
+            content = content[:2000] + "...[cut]"
+        block = "%s: %s" % (role, content)
+        if budget - len(block) < 0:
+            lines.append("...[earlier turns omitted]...")
+            break
+        lines.append(block)
+        budget -= len(block)
+    return "\n\n".join(lines)
+
+
+def summarize_turns(turns, prior=""):
+    blocks = []
+    if prior:
+        blocks.append("earlier summary: " + prior)
+    text = render_for_summary(turns)
+    if text:
+        blocks.append(text)
+    body = "\n\n".join(blocks)
+    if not body:
+        return prior
+    prompt = (
+        "Compress the conversation excerpt below into a compact briefing for "
+        "continuing the same task. Keep facts, file paths, commands, versions, "
+        "decisions, errors and unresolved questions. Drop pleasantries and "
+        "repetition. Write at most 200 words, plain text, no preamble.\n\n"
+        + body
+    )
+    try:
+        response = get_llm().invoke(
+            [HumanMessage(content=prompt[: SUMMARY_INPUT_CHARS + 4000])]
+        )
+        summary = content_to_text(getattr(response, "content", response)).strip()
+    except Exception as exc:
+        summary = prior or "summary unavailable (%s)" % exc
+    if len(summary) > SUMMARY_MAX_CHARS:
+        summary = summary[:SUMMARY_MAX_CHARS] + "...[cut]"
+    return summary
+
+
+def compress_history(history, summarize=None, count=None):
+    global SUMMARIZE_CALLS, COMPRESSED_TURNS
+    if not CAGE_SUMMARIZE:
+        return None
+    if summarize is None:
+        summarize = summarize_turns
+    if count is None:
+        count = count_tokens
+    SUMMARIZE_CALLS = []
+    tokens = sum(count(turn.get("content", "")) for turn in history) + count(SYSTEM_PROMPT)
+    if CONTEXT_TOKENS > 0 and tokens <= CAGE_CONTEXT_TOKENS:
+        return None
+    available = list(history)
+    if len(available) < 2:
+        return None
+    batch_n = min(COMPRESS_BATCH, max(2, len(available) - 2))
+    if batch_n % 2:
+        batch_n -= 1
+    if batch_n <= 0:
+        batch_n = 2 if len(available) >= 2 else len(available)
+    older = history[:batch_n]
+    SUMMARIZE_CALLS.append({"turns": len(older)})
+    summary = summarize(older, prior="")
+    del history[:batch_n]
+    archive_turns(older, "compressed")
+    COMPRESSED_TURNS += batch_n
+    entry = {"role": "assistant", "content": LOSSY_MARKER + " " + (summary or "")}
+    history.insert(0, entry)
+    return {"folded": batch_n, "summaries": [summary]}
+
+
+def run_chat(message):
+    confirm = False
+    if isinstance(message, dict):
+        confirm = bool(message.get("confirm"))
+        message = message.get("message") or ""
+    if confirm:
+        os.environ["CAGE_AUTO_CONFIRM"] = "1"
+    inferred = _inferred_install(message)
+    if inferred and not auto_confirm():
+        tool, args = inferred
+        if _decide_tool(tool, args) == "confirm":
+            return {
+                "reply": "pending confirmation for %s" % tool,
+                "pending": {
+                    "tool": tool,
+                    "args": args,
+                    "reason": "autonomy:%s" % autonomy_of(),
+                },
+            }
+    mode = CAGE_AGENT_MODE or AGENT_MODE or "orchestrator"
+    if (
+        mode == "orchestrator"
+        and not INJECTED
+        and getattr(spawn_worker, "__name__", "spawn_worker") != "spawn_worker"
+    ):
+        result = spawn_worker(
+            message, ["run_command", "write_file", "read_file", "list_files"], 8, 200000
+        )
+        if not isinstance(result, dict):
+            result = {"summary": str(result)}
+        try:
+            from cage.workers import clamp_worker_result
+
+            result = clamp_worker_result(result)
+        except Exception:
+            pass
+        summary = str(result.get("summary") or "")
+        with HISTORY_LOCK:
+            HISTORY.append({"role": "user", "content": safe_text(message)})
+            HISTORY.append(
+                {
+                    "role": "assistant",
+                    "content": summary,
+                    "worker_id": result.get("transcript_digest") or "",
+                }
+            )
+            turns = sum(1 for turn in HISTORY if turn.get("role") == "user")
+        return {
+            "reply": summary,
+            "pending": None,
+            "tools_used": ["delegate"],
+            "memory": {"history_turns": turns},
+        }
+    if not INJECTED:
+        raise RuntimeError(
+            "LLM not injected: MCAI_LLM_BASE_URL and MCAI_LLM_API_KEY are required"
+        )
+    message, trimmed = truncate_message(safe_text(message))
+    with HISTORY_LOCK:
+        reduce_history(HISTORY)
+        if CAGE_SUMMARIZE:
+            compress_history(HISTORY)
+
+        messages = [SystemMessage(content=safe_text(SYSTEM_PROMPT))]
+        index = build_index(load_archive())
+        if index:
+            messages.append(SystemMessage(content="index:\n" + index))
+        for turn in HISTORY:
+            if turn["role"] == "user":
+                messages.append(HumanMessage(content=safe_text(turn["content"])))
+            else:
+                messages.append(AIMessage(content=safe_text(turn["content"])))
+        messages.append(HumanMessage(content=safe_text(message)))
+
+        reply, used = call_with_protocol_retry(messages)
+
+        reply, trimmed_reply = truncate_message(safe_text(reply))
+        HISTORY.append({"role": "user", "content": safe_text(message)})
+        HISTORY.append({"role": "assistant", "content": reply})
+        dropped = evict_history(HISTORY, CAGE_MAX_TURNS)
+        if CAGE_SUMMARIZE:
+            compress_history(HISTORY)
+        lossy = any(
+            str(turn.get("content", "")).startswith(LOSSY_MARKER) for turn in HISTORY
+        )
+        memory = {
+            "trimmed_input": trimmed,
+            "trimmed_reply": trimmed_reply,
+            "evicted": dropped,
+            "compressed_turns": COMPRESSED_TURNS,
+            "history_turns": sum(1 for turn in HISTORY if turn.get("role") == "user"),
+            "context_tokens": CAGE_CONTEXT_TOKENS,
+            "history_tokens": history_tokens(HISTORY),
+            "lossy_in_context": lossy,
+        }
+        return {
+            "reply": reply,
+            "pending": None,
+            "tools_used": used,
+            "memory": memory,
+        }
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):
+        sys.stderr.write("cage-agent %s - %s\n" % (self.address_string(), fmt % args))
+
+    def send_json(self, status, payload):
+        payload = dict(payload)
+        payload.update(common_fields())
+        body = json.dumps(json_sanitize(payload), ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def path_only(self):
+        return urlparse(self.path).path
+
+    def do_GET(self):
+        path = self.path_only()
+        try:
+            if path == "/health":
+                self.send_json(200, {"ok": True})
+            elif path == "/info":
+                with HISTORY_LOCK:
+                    turns = sum(1 for turn in HISTORY if turn.get("role") == "user")
+                    used_tokens = history_tokens(HISTORY) + count_tokens(SYSTEM_PROMPT)
+                    lossy = any(
+                        str(turn.get("content", "")).startswith(LOSSY_MARKER)
+                        for turn in HISTORY
+                    )
+                with ARCHIVE_LOCK:
+                    archived = len(ARCHIVE)
+                self.send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "framework": AGENT_FRAMEWORK,
+                        "source": AGENT_SOURCE,
+                        "profile": AGENT_PROFILE,
+                        "install": INSTALL_ENABLED,
+                        "mode": AGENT_MODE,
+                        "model": MODEL,
+                        "llm_host": LLM_HOST,
+                        "via": "mc-direct",
+                        "injected": INJECTED,
+                        "protocol": detect_protocol() if INJECTED else "unset",
+                        "tools": [t.name for t in select_tools(CAGE_AGENT_MODE or AGENT_MODE)],
+                        "workspace": WORKSPACE,
+                        "history_turns": turns,
+                        "history_tokens": used_tokens,
+                        "context_tokens": CAGE_CONTEXT_TOKENS,
+                        "context_hard_limit": CONTEXT_HARD_LIMIT,
+                        "max_message_chars": MAX_MESSAGE_CHARS,
+                        "max_turns": CAGE_MAX_TURNS,
+                        "compress_batch": COMPRESS_BATCH,
+                        "compressed_turns": COMPRESSED_TURNS,
+                        "archived_turns": archived,
+                        "lossy_in_context": lossy,
+                        "autonomy": autonomy_of(),
+                        "auto_actions_used": (lambda u: int((u or {}).get("count") or 0))(
+                            {}
+                        ),
+                        "workers_spawned": int(os.environ.get("CAGE_WORKERS_SPAWNED", "0") or 0),
+                        "challenge_policy_hosts": len(
+                            [
+                                p
+                                for p in os.environ.get("CAGE_CHALLENGE_HOSTS", "").split(",")
+                                if p.strip()
+                            ]
+                        ),
+                        "action_budget_left": max(
+                            0,
+                            int(os.environ.get("CAGE_ACTION_BUDGET", "500") or 500),
+                        ),
+                        "audit_stream": True,
+                    },
+                )
+            elif path == "/history":
+                with HISTORY_LOCK:
+                    live = [dict(turn) for turn in HISTORY]
+                    tokens = history_tokens(HISTORY)
+                with ARCHIVE_LOCK:
+                    archived = [dict(entry) for entry in ARCHIVE]
+                self.send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "context_tokens": CAGE_CONTEXT_TOKENS,
+                        "history_tokens": tokens,
+                        "compressed_turns": COMPRESSED_TURNS,
+                        "history": live,
+                        "archive": archived,
+                    },
+                )
+            elif path == "/files":
+                query = parse_qs(urlparse(self.path).query)
+                rel = (query.get("path") or ["."])[0]
+                read = (query.get("read") or ["0"])[0] in ("1", "true", "yes")
+                try:
+                    target = _workspace_path(rel)
+                except ValueError as exc:
+                    self.send_json(400, {"ok": False, "error": str(exc)})
+                    return
+                if read:
+                    if not os.path.isfile(target):
+                        self.send_json(400, {"ok": False, "error": "not a file"})
+                        return
+                    with open(target, "r", encoding="utf-8", errors="replace") as handle:
+                        content = _truncate(handle.read())
+                    self.send_json(200, {"ok": True, "content": content})
+                else:
+                    if not os.path.isdir(target):
+                        self.send_json(400, {"ok": False, "error": "not a directory"})
+                        return
+                    entries = []
+                    for item in sorted(os.scandir(target), key=lambda e: e.name):
+                        stat = item.stat()
+                        entries.append(
+                            {
+                                "name": item.name,
+                                "dir": item.is_dir(follow_symlinks=False),
+                                "size": stat.st_size,
+                                "mtime": time.strftime("%m-%d %H:%M", time.localtime(stat.st_mtime)),
+                            }
+                        )
+                    self.send_json(200, {"ok": True, "path": rel, "entries": entries})
+            else:
+                self.send_json(404, {"ok": False, "error": "not found"})
+        except Exception as exc:
+            self.send_json(
+                500,
+                {"ok": False, "error": str(exc), "trace": traceback.format_exc()},
+            )
+
+    def do_POST(self):
+        path = self.path_only()
+        if path != "/chat":
+            self.send_json(404, {"ok": False, "error": "not found"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        raw = self.rfile.read(length) if length > 0 else b""
+        try:
+            data = json.loads(raw.decode("utf-8", "replace"))
+        except (ValueError, UnicodeDecodeError):
+            self.send_json(400, {"ok": False, "error": "invalid json"})
+            return
+        if not isinstance(data, dict):
+            self.send_json(400, {"ok": False, "error": "message is empty"})
+            return
+        message = data.get("message")
+        confirm = bool(data.get("confirm"))
+        if not confirm and (not isinstance(message, str) or not message.strip()):
+            self.send_json(400, {"ok": False, "error": "message is empty"})
+            return
+        try:
+            payload = {"message": safe_text(message or ""), "confirm": True} if confirm else safe_text(message or "")
+            result = run_chat(payload)
+            if isinstance(result, tuple):
+                reply, tools_used, memory = result
+                pending = None
+            else:
+                reply = result.get("reply")
+                tools_used = result.get("tools_used")
+                memory = result.get("memory")
+                pending = result.get("pending")
+            body = {
+                "ok": True,
+                "reply": reply,
+                "tools_used": tools_used,
+                "memory": memory,
+            }
+            if pending:
+                body["pending"] = pending
+            self.send_json(200, body)
+        except Exception as exc:
+            self.send_json(
+                500,
+                {"ok": False, "error": str(exc), "trace": traceback.format_exc()},
+            )
+
+
+ISOLIS_HISTORY = []
+ISOLIS_HISTORY_LOCK = threading.Lock()
+ISOLIS_ARCHIVE = []
+ISOLIS_ARCHIVE_LOCK = threading.Lock()
+ISOLIS_COMPRESSED_TURNS = 0
+ISOLIS_LLM = None
+ISOLIS_LLM_LOCK = threading.Lock()
+ISOLIS_PROTOCOL = None
+ISOLIS_PROTOCOL_LOCK = threading.Lock()
+ISOLIS_SOURCE = os.environ.get("ISOLIS_SOURCE", "local").strip() or "local"
+ISOLIS_DEFAULT_MODEL = "monkeycode-pro/gpt-5.6-terra"
+ISOLIS_COMPRESS_MARKER = "[compressed history]"
+
+
+def _isolis_named_tool(name):
+    def decorator(func):
+        if HAS_LANGCHAIN:
+            return tool(name)(func)
+        wrapped = tool(func)
+        wrapped.name = name
+        return wrapped
+    return decorator
+
+
+def _isolis_int(name, default):
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value >= 0 else default
+
+
+ISOLIS_MAX_TURNS = _isolis_int("ISOLIS_MAX_TURNS", 400)
+ISOLIS_MAX_TOOL_STEPS = _isolis_int("ISOLIS_MAX_TOOL_STEPS", 8)
+ISOLIS_SHELL_TIMEOUT = _isolis_int("ISOLIS_SHELL_TIMEOUT", 120)
+ISOLIS_INSTALL_TIMEOUT = _isolis_int("ISOLIS_INSTALL_TIMEOUT", 1800)
+ISOLIS_MAX_OUTPUT = _isolis_int("ISOLIS_MAX_OUTPUT", 20000)
+ISOLIS_CONTEXT_HARD_LIMIT = _isolis_int("ISOLIS_CONTEXT_HARD_LIMIT", 1000000)
+ISOLIS_MAX_MESSAGE_CHARS = _isolis_int("ISOLIS_MAX_MESSAGE_CHARS", 900000)
+ISOLIS_COMPRESS_BATCH = _isolis_int("ISOLIS_COMPRESS_BATCH", 40)
+ISOLIS_SUMMARY_MAX_CHARS = _isolis_int("ISOLIS_SUMMARY_MAX_CHARS", 8000)
+ISOLIS_SUMMARY_INPUT_CHARS = _isolis_int("ISOLIS_SUMMARY_INPUT_CHARS", 60000)
+ISOLIS_ARCHIVE_MAX = _isolis_int("ISOLIS_ARCHIVE_MAX", 4000)
+ISOLIS_WORKSPACE = "/work"
+ISOLIS_ANDROID_HOME = os.environ.get("ANDROID_HOME", "/opt/android-sdk").strip() or "/opt/android-sdk"
+ISOLIS_PROFILE = os.environ.get("ISOLIS_PROFILE", "tooled").strip() or "tooled"
+_install_raw = os.environ.get("ISOLIS_INSTALL", "1").strip().lower()
+ISOLIS_INSTALL = _install_raw not in ("0", "false", "no", "off")
+
+ISOLIS_CONTEXT_TOKENS = _isolis_int("ISOLIS_CONTEXT_TOKENS", 900000)
+if ISOLIS_CONTEXT_TOKENS > ISOLIS_CONTEXT_HARD_LIMIT:
+    sys.stderr.write(
+        "isolis-agent: ISOLIS_CONTEXT_TOKENS %d exceeds the upstream limit %d; "
+        "clamping\n" % (ISOLIS_CONTEXT_TOKENS, ISOLIS_CONTEXT_HARD_LIMIT)
+    )
+    ISOLIS_CONTEXT_TOKENS = ISOLIS_CONTEXT_HARD_LIMIT
+
+os.environ.setdefault("TIKTOKEN_CACHE_DIR", "/tmp")
+
+
+def isolis_agent_name():
+    return os.environ.get("ISOLIS_AGENT_NAME", "").strip() or "default"
+
+
+def isolis_fields():
+    return {
+        "agent": isolis_agent_name(),
+        "hostname": socket.gethostname(),
+        "pid": os.getpid(),
+        "cwd": os.getcwd(),
+    }
+
+
+def isolis_model_name():
+    return (
+        os.environ.get("ISOLIS_MODEL", "").strip()
+        or os.environ.get("MCAI_LLM_MODEL", "").strip()
+        or ISOLIS_DEFAULT_MODEL
+    )
+
+
+def isolis_llm_host():
+    base = os.environ.get("MCAI_LLM_BASE_URL", "").strip()
+    return urlparse(base).netloc if base else ""
+
+
+def isolis_injected():
+    base = os.environ.get("MCAI_LLM_BASE_URL", "").strip()
+    key = os.environ.get("MCAI_LLM_API_KEY", "").strip()
+    return bool(base and key)
+
+
+def isolis_system_prompt():
+    custom = os.environ.get("ISOLIS_SYSTEM_PROMPT", "").strip()
+    if custom:
+        return custom
+    lines = [
+        "You are Isolis, a coding agent running inside an isolated Docker "
+        "container. You cannot see the host filesystem, sibling agent "
+        "containers, or the Docker socket.",
+        "Your workspace is /work. Keep project files there.",
+        "Match the user's language. Be concise and factual. Verify claims by "
+        "running commands before reporting success.",
+    ]
+    if ISOLIS_INSTALL:
+        lines.append(
+            "Profile '%s': install_packages (apt, pip, npm) and "
+            "install_android_sdk are available." % ISOLIS_PROFILE
+        )
+    else:
+        lines.append(
+            "Profile '%s': package installation is disabled. "
+            "Work with what the image already provides." % ISOLIS_PROFILE
+        )
+    return " ".join(lines)
+
+
+def isolis_count_tokens(text):
+    if not text:
+        return 0
+    if ENCODER is not None:
+        try:
+            return len(ENCODER.encode(safe_text(text), disallowed_special=()))
+        except Exception:
+            pass
+    return max(1, len(safe_text(text)) // 4)
+
+
+def isolis_history_tokens(history):
+    return sum(isolis_count_tokens(turn.get("content", "")) for turn in history)
+
+
+def isolis_truncate(text, cap):
+    text = safe_text(text)
+    if cap <= 0 or len(text) <= cap:
+        return text, False
+    keep = max(2, cap - 120)
+    head = keep // 2
+    tail = keep - head
+    note = "\n...[truncated %d chars]...\n" % (len(text) - keep)
+    return text[:head] + note + text[-tail:], True
+
+
+def isolis_truncate_output(text):
+    text = safe_text(text)
+    if len(text) <= ISOLIS_MAX_OUTPUT:
+        return text
+    return text[:ISOLIS_MAX_OUTPUT] + "\n...[truncated %d chars]" % (
+        len(text) - ISOLIS_MAX_OUTPUT
+    )
+
+
+def _isolis_workspace_path(rel):
+    root = ISOLIS_WORKSPACE
+    target = os.path.realpath(os.path.join(root, rel or "."))
+    base = os.path.realpath(root)
+    if target != base and not target.startswith(base + os.sep):
+        raise ValueError("path escapes the workspace: %s" % rel)
+    return target
+
+
+def _isolis_probe(url, body, timeout=6):
+    key = os.environ.get("MCAI_LLM_API_KEY", "").strip()
+    data = json.dumps(json_sanitize(body), ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(url, data=data, method="POST")
+    request.add_header("Authorization", "Bearer " + key)
+    request.add_header("Content-Type", "application/json")
+    request.add_header("anthropic-version", "2023-06-01")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            response.read(400)
+            return response.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
+    except Exception:
+        return None
+
+
+def isolis_detect_protocol():
+    global ISOLIS_PROTOCOL
+    with ISOLIS_PROTOCOL_LOCK:
+        if ISOLIS_PROTOCOL is not None:
+            return ISOLIS_PROTOCOL
+        base = os.environ.get("MCAI_LLM_BASE_URL", "").strip().rstrip("/")
+        host = (urlparse(base).hostname or "").lower()
+        if host.endswith(".example") or host.endswith(".example.com") or host in (
+            "example",
+            "example.com",
+            "example.invalid",
+        ):
+            ISOLIS_PROTOCOL = "openai"
+            return ISOLIS_PROTOCOL
+        body = {
+            "model": isolis_model_name(),
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "ping"}],
+        }
+        status = _isolis_probe(base + "/chat/completions", body)
+        ISOLIS_PROTOCOL = "anthropic" if status in (404, 405) else "openai"
+        return ISOLIS_PROTOCOL
+
+
+def isolis_anthropic_base():
+    base = os.environ.get("MCAI_LLM_BASE_URL", "").strip().rstrip("/")
+    if base.endswith("/v1"):
+        base = base[:-3]
+    return base
+
+
+def isolis_build_llm():
+    if not HAS_LANGCHAIN:
+        raise RuntimeError("langchain is not installed")
+    base = os.environ.get("MCAI_LLM_BASE_URL", "").strip()
+    key = os.environ.get("MCAI_LLM_API_KEY", "").strip()
+    if not base or not key:
+        raise RuntimeError(
+            "LLM not injected: MCAI_LLM_BASE_URL and MCAI_LLM_API_KEY are required"
+        )
+    if isolis_detect_protocol() == "anthropic":
+        from langchain_anthropic import ChatAnthropic
+
+        return ChatAnthropic(
+            base_url=isolis_anthropic_base(),
+            api_key=key,
+            model=isolis_model_name(),
+            timeout=60,
+            max_retries=1,
+            temperature=0.4,
+            max_tokens=4096,
+        )
+    return ChatOpenAI(
+        base_url=base,
+        api_key=key,
+        model=isolis_model_name(),
+        timeout=60,
+        max_retries=1,
+        temperature=0.4,
+    )
+
+
+def isolis_get_llm():
+    global ISOLIS_LLM
+    with ISOLIS_LLM_LOCK:
+        if ISOLIS_LLM is None:
+            ISOLIS_LLM = isolis_build_llm()
+        return ISOLIS_LLM
+
+
+def isolis_reset_llm():
+    global ISOLIS_LLM
+    with ISOLIS_LLM_LOCK:
+        ISOLIS_LLM = None
+
+
+def isolis_flip_protocol():
+    global ISOLIS_PROTOCOL
+    with ISOLIS_PROTOCOL_LOCK:
+        ISOLIS_PROTOCOL = "anthropic" if ISOLIS_PROTOCOL != "anthropic" else "openai"
+    isolis_reset_llm()
+
+
+def isolis_describe_error(err):
+    text = safe_text(str(err)).replace("\n", " ").strip() or type(err).__name__
+    status = error_status(err)
+    if status == 401:
+        return "upstream HTTP 401: injected credentials were rejected"
+    if status == 403 or text.lower() == "forbidden":
+        return "upstream HTTP 403: the gateway rejected this request"
+    if len(text) > 400:
+        text = text[:400] + "..."
+    return text
+
+
+def _isolis_run_shell(command, timeout):
+    try:
+        proc = subprocess.run(
+            ["/bin/sh", "-c", command],
+            cwd=ISOLIS_WORKSPACE,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return "error: command timed out after %ds" % timeout
+    except OSError as exc:
+        return "error: %s" % exc
+    parts = []
+    if proc.stdout:
+        parts.append(proc.stdout)
+    if proc.stderr:
+        parts.append("[stderr] " + proc.stderr)
+    parts.append("[exit %d]" % proc.returncode)
+    return "\n".join(parts)
+
+
+@_isolis_named_tool("run_command")
+def isolis_run_command(cmd: str) -> str:
+    """Run a non-interactive shell command inside the sandbox with cwd /work."""
+    if not isinstance(cmd, str) or not cmd.strip():
+        return "error: empty command"
+    return isolis_truncate_output(_isolis_run_shell(cmd, ISOLIS_SHELL_TIMEOUT))
+
+
+@_isolis_named_tool("write_file")
+def isolis_write_file(path: str, content: str) -> str:
+    """Write text to a file inside /work, creating parent directories."""
+    try:
+        target = _isolis_workspace_path(path)
+    except ValueError as exc:
+        return "error: %s" % exc
+    try:
+        parent = os.path.dirname(target)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write(safe_text(content))
+    except OSError as exc:
+        return "error: %s" % exc
+    return "wrote %d chars to %s" % (len(content), os.path.relpath(target, ISOLIS_WORKSPACE))
+
+
+@_isolis_named_tool("read_file")
+def isolis_read_file(path: str) -> str:
+    """Read a text file inside /work."""
+    try:
+        target = _isolis_workspace_path(path)
+    except ValueError as exc:
+        return "error: %s" % exc
+    try:
+        with open(target, "r", encoding="utf-8", errors="replace") as handle:
+            return isolis_truncate_output(handle.read())
+    except OSError as exc:
+        return "error: %s" % exc
+
+
+@_isolis_named_tool("list_files")
+def isolis_list_files(path: str = ".") -> str:
+    """List files and directories inside /work."""
+    try:
+        target = _isolis_workspace_path(path)
+    except ValueError as exc:
+        return "error: %s" % exc
+    if not os.path.isdir(target):
+        return "error: not a directory: %s" % path
+    lines = []
+    for entry in sorted(os.listdir(target)):
+        full = os.path.join(target, entry)
+        lines.append(entry + ("/" if os.path.isdir(full) else ""))
+    return isolis_truncate_output("\n".join(lines) or "(empty)")
+
+
+@_isolis_named_tool("browse")
+def isolis_browse(url: str, screenshot: bool = False) -> str:
+    """Open a URL in headless Chromium and return the title and visible text."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        return "error: playwright is unavailable: %s" % exc
+    if not isinstance(url, str) or not url.strip():
+        return "error: url is empty"
+    url = url.strip()
+    if not re.match(r"^https?://", url):
+        return "error: url must be http(s)"
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+            )
+            try:
+                page = browser.new_page()
+                page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                title = page.title()
+                text = page.inner_text("body", timeout=15000)
+                result = "title: %s\nurl: %s\ntext:\n%s" % (title, page.url, text)
+                if screenshot:
+                    name = "shot-%d.png" % int(time.time() * 1000)
+                    out = _isolis_workspace_path(name)
+                    page.screenshot(path=out, full_page=True)
+                    result += "\nscreenshot: %s" % os.path.relpath(out, ISOLIS_WORKSPACE)
+                return isolis_truncate_output(result)
+            finally:
+                browser.close()
+    except Exception as exc:
+        return "error: browse failed: %s" % exc
+
+
+@_isolis_named_tool("install_packages")
+def isolis_install_packages(manager: str, packages: str) -> str:
+    """Install development packages. manager is one of apt, pip, npm."""
+    if not ISOLIS_INSTALL:
+        return "error: package installation is disabled in the strict profile"
+    if not isinstance(manager, str) or manager not in ("apt", "pip", "npm"):
+        return "error: manager must be one of apt, pip, npm"
+    names = " ".join((packages or "").split())
+    if not names:
+        return "error: empty package list"
+    if manager == "apt":
+        command = (
+            "apt-get update -qq && "
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "
+            "--no-install-recommends " + names
+        )
+    elif manager == "pip":
+        command = "python -m pip install --no-cache-dir " + names
+    else:
+        command = "npm install -g " + names
+    return isolis_truncate_output(_isolis_run_shell(command, ISOLIS_INSTALL_TIMEOUT))
+
+
+def _isolis_android_installer():
+    here = os.path.dirname(os.path.abspath(__file__))
+    local = os.path.join(here, "install-android-sdk.sh")
+    if os.path.isfile(local):
+        return local
+    return "/app/install-android-sdk.sh"
+
+
+@_isolis_named_tool("install_android_sdk")
+def isolis_install_android_sdk(packages: str = "") -> str:
+    """Install the Android command-line tools and packages under ANDROID_HOME."""
+    if not ISOLIS_INSTALL:
+        return "error: package installation is disabled in the strict profile"
+    names = " ".join((packages or "").split())
+    prefix = "ANDROID_PACKAGES='%s' " % names if names else ""
+    command = prefix + "sh %s" % _isolis_android_installer()
+    return isolis_truncate_output(_isolis_run_shell(command, ISOLIS_INSTALL_TIMEOUT))
+
+
+
+ISOLIS_BASELINE_TOOLS = [
+    isolis_run_command,
+    isolis_write_file,
+    isolis_read_file,
+    isolis_list_files,
+    isolis_browse,
+]
+ISOLIS_TOOLS = list(ISOLIS_BASELINE_TOOLS)
+if ISOLIS_INSTALL:
+    ISOLIS_TOOLS += [isolis_install_packages, isolis_install_android_sdk]
+
+
+def isolis_tool_names():
+    return [getattr(item, "name", getattr(item, "__name__", "")) for item in ISOLIS_TOOLS]
+
+
+def isolis_archive_turns(turns, reason):
+    if not turns:
+        return
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    with ISOLIS_ARCHIVE_LOCK:
+        for turn in turns:
+            ISOLIS_ARCHIVE.append(
+                {
+                    "role": turn.get("role", ""),
+                    "content": turn.get("content", ""),
+                    "reason": reason,
+                    "at": stamp,
+                }
+            )
+        if len(ISOLIS_ARCHIVE) > ISOLIS_ARCHIVE_MAX:
+            del ISOLIS_ARCHIVE[: len(ISOLIS_ARCHIVE) - ISOLIS_ARCHIVE_MAX]
+
+
+def isolis_archive_len():
+    with ISOLIS_ARCHIVE_LOCK:
+        return len(ISOLIS_ARCHIVE)
+
+
+def isolis_load_archive():
+    with ISOLIS_ARCHIVE_LOCK:
+        return [dict(entry) for entry in ISOLIS_ARCHIVE]
+
+
+def _isolis_marker(turn):
+    return str(turn.get("content", "")).startswith(ISOLIS_COMPRESS_MARKER)
+
+
+def _isolis_user_count(history):
+    return sum(1 for turn in history if turn.get("role") == "user")
+
+
+def isolis_evict(history):
+    removed = 0
+    while _isolis_user_count(history) > ISOLIS_MAX_TURNS:
+        index = 1 if history and _isolis_marker(history[0]) else 0
+        if index >= len(history):
+            break
+        pair = [history.pop(index)]
+        if index < len(history) and history[index].get("role") != "user":
+            pair.append(history.pop(index))
+        isolis_archive_turns(pair, "evicted")
+        removed += 1
+    return removed
+
+
+def _isolis_summary_input(turns):
+    lines = []
+    budget = ISOLIS_SUMMARY_INPUT_CHARS
+    for turn in turns:
+        content = (turn.get("content") or "").strip()
+        if not content:
+            continue
+        if len(content) > 2000:
+            content = content[:2000] + "...[cut]"
+        block = "%s: %s" % ("user" if turn.get("role") == "user" else "assistant", content)
+        if budget - len(block) < 0:
+            lines.append("...[earlier turns omitted]...")
+            break
+        lines.append(block)
+        budget -= len(block)
+    return "\n\n".join(lines)
+
+
+def _isolis_local_summary(turns, prior=""):
+    text = "\n".join(
+        "%s: %s" % (turn.get("role", "user"), (turn.get("content") or "").strip())
+        for turn in turns
+        if (turn.get("content") or "").strip()
+    )
+    if prior:
+        text = prior + "\n" + text
+    if len(text) > ISOLIS_SUMMARY_MAX_CHARS:
+        text = text[:ISOLIS_SUMMARY_MAX_CHARS] + "\n...[summary cut]..."
+    return text
+
+
+def isolis_summarize(turns, prior=""):
+    body = _isolis_summary_input(turns)
+    if not body and not prior:
+        return prior
+    parts = []
+    if prior:
+        parts.append("Earlier summary:\n" + prior)
+    if body:
+        parts.append(body)
+    prompt = (
+        "Compress the conversation excerpt below into a compact briefing that "
+        "lets the same task continue. Keep facts, file paths, commands, "
+        "versions, decisions, errors and unresolved questions. Drop "
+        "pleasantries and repetition. Reply with plain text only.\n\n"
+        + "\n\n".join(parts)
+    )
+    try:
+        response = isolis_get_llm().invoke([HumanMessage(content=prompt)])
+        summary = content_to_text(getattr(response, "content", response)).strip()
+        if not summary:
+            summary = _isolis_local_summary(turns, prior)
+    except Exception:
+        summary = _isolis_local_summary(turns, prior)
+    if len(summary) > ISOLIS_SUMMARY_MAX_CHARS:
+        summary = summary[:ISOLIS_SUMMARY_MAX_CHARS] + "\n...[summary cut]..."
+    return summary
+
+
+def isolis_compress(history):
+    global ISOLIS_COMPRESSED_TURNS
+    if ISOLIS_CONTEXT_TOKENS <= 0:
+        return 0
+    folded_total = 0
+    while True:
+        if (
+            isolis_history_tokens(history) + isolis_count_tokens(isolis_system_prompt())
+            <= ISOLIS_CONTEXT_TOKENS
+        ):
+            break
+        marker = history[0] if history and _isolis_marker(history[0]) else None
+        body = history[1:] if marker is not None else list(history)
+        eligible = len(body) - 2
+        if eligible < 2:
+            break
+        batch = min(ISOLIS_COMPRESS_BATCH, eligible)
+        if batch % 2:
+            batch -= 1
+        if batch < 2:
+            break
+        older = body[:batch]
+        rest = body[batch:]
+        prior = ""
+        if marker is not None:
+            prior = marker.get("content", "")[len(ISOLIS_COMPRESS_MARKER):].strip()
+        summary = isolis_summarize(older, prior)
+        isolis_archive_turns(older, "compressed")
+        ISOLIS_COMPRESSED_TURNS += len(older)
+        folded_total += len(older)
+        entry = {"role": "assistant", "content": ISOLIS_COMPRESS_MARKER + " " + summary}
+        history[:] = [entry] + rest
+    return folded_total
+
+
+def isolis_maintain(history):
+    evicted = isolis_evict(history)
+    if ISOLIS_CONTEXT_TOKENS > 0:
+        isolis_compress(history)
+    return evicted
+
+
+def isolis_bound_llm():
+    llm = isolis_get_llm()
+    try:
+        return llm.bind_tools(ISOLIS_TOOLS)
+    except Exception:
+        return llm
+
+
+def isolis_tool_loop(messages):
+    bound = isolis_bound_llm()
+    handlers = {getattr(item, "name", ""): item for item in ISOLIS_TOOLS}
+    current = list(messages)
+    transcript = []
+    last_text = ""
+    for _step in range(ISOLIS_MAX_TOOL_STEPS):
+        response = bound.invoke(current)
+        calls = list(getattr(response, "tool_calls", None) or [])
+        text = content_to_text(getattr(response, "content", response))
+        if text:
+            last_text = text
+        if not calls:
+            return text, transcript
+        current.append(response)
+        for call in calls:
+            name = call.get("name") if isinstance(call, dict) else None
+            args = call.get("args") if isinstance(call, dict) else None
+            if not isinstance(args, dict):
+                args = {}
+            call_id = call.get("id") if isinstance(call, dict) else None
+            call_id = call_id or ("call_%d" % (len(transcript) + 1))
+            handler = handlers.get(name)
+            if handler is None:
+                output = "error: unknown tool %s" % name
+            else:
+                try:
+                    output = handler.invoke(args)
+                except Exception as exc:
+                    output = "error: %s" % exc
+            output = isolis_truncate_output(safe_text(str(output)))
+            transcript.append({"tool": name, "args": args})
+            current.append(ToolMessage(content=output, tool_call_id=call_id))
+    return last_text or ("stopped after %d tool steps" % ISOLIS_MAX_TOOL_STEPS), transcript
+
+
+def isolis_invoke(messages):
+    try:
+        return isolis_tool_loop(messages)
+    except Exception as err:
+        status = error_status(err)
+        text = safe_text(str(err)).lower()
+        if status in (404, 405) or "method not allowed" in text:
+            isolis_flip_protocol()
+            try:
+                return isolis_tool_loop(messages)
+            except Exception as err2:
+                raise RuntimeError(isolis_describe_error(err2)) from err2
+        raise RuntimeError(isolis_describe_error(err)) from err
+
+
+def isolis_build_messages(history, message):
+    messages = [SystemMessage(content=safe_text(isolis_system_prompt()))]
+    for turn in history:
+        if turn.get("role") == "user":
+            messages.append(HumanMessage(content=safe_text(turn.get("content", ""))))
+        else:
+            messages.append(AIMessage(content=safe_text(turn.get("content", ""))))
+    messages.append(HumanMessage(content=safe_text(message)))
+    return messages
+
+
+def isolis_chat(message):
+    text = safe_text(message).strip()
+    if not text:
+        raise ValueError("message is empty")
+    if not isolis_injected():
+        raise RuntimeError(
+            "LLM not injected: MCAI_LLM_BASE_URL and MCAI_LLM_API_KEY are required"
+        )
+    text, trimmed_input = isolis_truncate(text, ISOLIS_MAX_MESSAGE_CHARS)
+    with ISOLIS_HISTORY_LOCK:
+        evicted = isolis_maintain(ISOLIS_HISTORY)
+        messages = isolis_build_messages(ISOLIS_HISTORY, text)
+    reply, tools_used = isolis_invoke(messages)
+    reply, trimmed_reply = isolis_truncate(safe_text(reply), ISOLIS_MAX_MESSAGE_CHARS)
+    with ISOLIS_HISTORY_LOCK:
+        ISOLIS_HISTORY.append({"role": "user", "content": text})
+        ISOLIS_HISTORY.append({"role": "assistant", "content": reply})
+        evicted += isolis_maintain(ISOLIS_HISTORY)
+        memory = {
+            "trimmed_input": trimmed_input,
+            "trimmed_reply": trimmed_reply,
+            "evicted": evicted,
+            "compressed_turns": ISOLIS_COMPRESSED_TURNS,
+            "history_turns": _isolis_user_count(ISOLIS_HISTORY),
+            "context_tokens": ISOLIS_CONTEXT_TOKENS,
+            "history_tokens": isolis_history_tokens(ISOLIS_HISTORY),
+        }
+    return {
+        "reply": reply,
+        "tools_used": [item.get("tool") for item in tools_used if item.get("tool")],
+        "memory": memory,
+    }
+
+
+class IsolisHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):
+        return
+
+    def send_json(self, status, payload):
+        body = json.dumps(json_sanitize(payload), ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def path_only(self):
+        return urlparse(self.path).path
+
+    def do_GET(self):
+        path = self.path_only()
+        fields = isolis_fields()
+        try:
+            if path == "/health":
+                payload = {"ok": True}
+                payload.update(fields)
+                self.send_json(200, payload)
+                return
+            if path == "/info":
+                with ISOLIS_HISTORY_LOCK:
+                    turns = _isolis_user_count(ISOLIS_HISTORY)
+                    tokens = isolis_history_tokens(ISOLIS_HISTORY) + isolis_count_tokens(
+                        isolis_system_prompt()
+                    )
+                payload = {
+                    "ok": True,
+                    "framework": "langchain",
+                    "source": ISOLIS_SOURCE,
+                    "profile": ISOLIS_PROFILE,
+                    "install": ISOLIS_INSTALL,
+                    "android_home": ISOLIS_ANDROID_HOME,
+                    "model": isolis_model_name(),
+                    "llm_host": isolis_llm_host(),
+                    "via": "mc-direct",
+                    "injected": isolis_injected(),
+                    "protocol": isolis_detect_protocol() if isolis_injected() else "unset",
+                    "tools": isolis_tool_names(),
+                    "workspace": ISOLIS_WORKSPACE,
+                    "history_turns": turns,
+                    "history_tokens": tokens,
+                    "context_tokens": ISOLIS_CONTEXT_TOKENS,
+                    "context_hard_limit": ISOLIS_CONTEXT_HARD_LIMIT,
+                    "max_message_chars": ISOLIS_MAX_MESSAGE_CHARS,
+                    "max_turns": ISOLIS_MAX_TURNS,
+                    "compress_batch": ISOLIS_COMPRESS_BATCH,
+                    "compressed_turns": ISOLIS_COMPRESSED_TURNS,
+                    "archived_turns": isolis_archive_len(),
+                }
+                payload.update(fields)
+                self.send_json(200, payload)
+                return
+            if path == "/history":
+                with ISOLIS_HISTORY_LOCK:
+                    live = [dict(turn) for turn in ISOLIS_HISTORY]
+                    tokens = isolis_history_tokens(ISOLIS_HISTORY)
+                payload = {
+                    "ok": True,
+                    "context_tokens": ISOLIS_CONTEXT_TOKENS,
+                    "history_tokens": tokens,
+                    "compressed_turns": ISOLIS_COMPRESSED_TURNS,
+                    "history": live,
+                    "archive": isolis_load_archive(),
+                }
+                payload.update(fields)
+                self.send_json(200, payload)
+                return
+            self.send_json(404, {"ok": False, "error": "not found"})
+        except Exception as exc:
+            payload = {"ok": False, "error": str(exc), "trace": traceback.format_exc()}
+            payload.update(fields)
+            self.send_json(500, payload)
+
+    def do_POST(self):
+        fields = isolis_fields()
+        if self.path_only() != "/chat":
+            payload = {"ok": False, "error": "not found"}
+            payload.update(fields)
+            self.send_json(404, payload)
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        raw = self.rfile.read(length) if length > 0 else b""
+        try:
+            data = json.loads(raw.decode("utf-8", "replace"))
+        except (ValueError, UnicodeDecodeError):
+            payload = {"ok": False, "error": "invalid json"}
+            payload.update(fields)
+            self.send_json(400, payload)
+            return
+        if not isinstance(data, dict):
+            payload = {"ok": False, "error": "message is empty"}
+            payload.update(fields)
+            self.send_json(400, payload)
+            return
+        message = data.get("message")
+        if not isinstance(message, str) or not message.strip():
+            payload = {"ok": False, "error": "message is empty"}
+            payload.update(fields)
+            self.send_json(400, payload)
+            return
+        try:
+            result = isolis_chat(message)
+            payload = {
+                "ok": True,
+                "reply": result["reply"],
+                "tools_used": result["tools_used"],
+                "memory": result["memory"],
+            }
+            payload.update(fields)
+            self.send_json(200, payload)
+        except ValueError as exc:
+            payload = {"ok": False, "error": str(exc)}
+            payload.update(fields)
+            self.send_json(400, payload)
+        except Exception as exc:
+            payload = {"ok": False, "error": str(exc), "trace": traceback.format_exc()}
+            payload.update(fields)
+            self.send_json(500, payload)
+
+
+def isolis_main():
+    os.environ.setdefault("TIKTOKEN_CACHE_DIR", "/tmp")
+    server = ThreadingHTTPServer(("0.0.0.0", 8080), IsolisHandler)
+    server.daemon_threads = True
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+def main():
+    if os.environ.get("ISOLIS_AGENT_NAME", "").strip():
+        return isolis_main()
+    if "--worker" in sys.argv:
+        args = sys.argv[1:]
+        task = ""
+        tools = []
+        index = 0
+        while index < len(args):
+            if args[index] == "--task" and index + 1 < len(args):
+                task = args[index + 1]
+                index += 2
+                continue
+            if args[index] == "--tools" and index + 1 < len(args):
+                tools = [part.strip() for part in args[index + 1].split(",") if part.strip()]
+                index += 2
+                continue
+            index += 1
+        os.environ["CAGE_AGENT_MODE"] = "worker"
+        global AGENT_MODE, CAGE_AGENT_MODE, TOOLS, HISTORY
+        AGENT_MODE = "worker"
+        CAGE_AGENT_MODE = "worker"
+        TOOLS = select_tools("worker")
+        HISTORY = []
+        result = run_chat(task or "worker task")
+        if isinstance(result, dict):
+            payload = {
+                "summary": result.get("reply") or "",
+                "facts": {},
+                "files": [],
+                "errors": [],
+                "steps_used": 0,
+                "transcript_digest": "worker",
+            }
+        else:
+            payload = {"summary": str(result)}
+        sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        return
+    bind = os.environ.get("CAGE_BIND", "127.0.0.1").strip() or "127.0.0.1"
+    server = ThreadingHTTPServer((bind, 8080), Handler)
+    server.daemon_threads = True
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,14 @@
+isolis doctor
+  [ok]   Docker version 20.10.24+dfsg1, build 297e128
+  [ok]   daemon reachable
+  [ok]   Docker Hub blocked, mirror configured: https://docker.m.daocloud.io
+  [fail] MonkeyCode LLM was not injected: MCAI_LLM_BASE_URL and MCAI_LLM_API_KEY are required
+  [ok]   agent sources: /workspace/agent
+  [ok]   profile: tooled (install on)
+  [ok]   context budget: 900000 tokens of 1000000 upstream max (auto compression on)
+  [ok]   limits: turns 400, message 900000 chars
+  [ok]   agent source: local (/workspace/agent)
+  [ok]   image isolis-agent:tooled-ca22788ffe present
+  [ok]   network isolis-net present
+  [ok]   state file readable (1 agents, current: default)
+result: not ready (fix the [fail] lines)

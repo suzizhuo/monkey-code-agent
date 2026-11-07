@@ -1,0 +1,111 @@
+# Isolis Prompt Spec
+Host TUI creating isolated LangChain agents in Docker. Dual mandate: strong isolation by default; real development (SDKs/build tools inside container).
+python3 isolis.py | agent/server.py | agent/Dockerfile | agent/install-android-sdk.sh | agent/requirements.txt (LangChain+Playwright) | isolis-agent:<profile>-<source-hash> | .isolis/state.json | .isolis/agent-src/
+isolis.py: host TUI/orchestrator; Docker CLI + agent HTTP; stdlib only. agent/server.py: provider-neutral LangChain HTTP runtime.
+
+## Cmds
+python3 isolis.py [setup|doctor|init [name]|chat|use <name>|status|rebuild|stop [name]|profiles|help]
+isolis>: same + quit/exit. setup=Docker/mirror/image/network. you>: text->POST /chat | /back | /quit | /help
+init/setup/rebuild: --profile strict|tooled (default tooled) --source <local|git-url> (default local) --model <name>
+Unknown options/missing values: one-line reject.
+
+## Names/ports
+Default name default. Sanitize [A-Za-z0-9_-], collapse separators, trim, max 40. Changed name: one notice. Container isolis-<name>.
+Ports 18080-18119 first free. Skip if in state, published, or listening. Exhausted: error.
+
+## Profiles
+Invariants: isolis-net bridge icc-off; alias=name; one port 127.0.0.1; no host mount; no Docker socket; tmpfs /tmp /work /dev/shm; no-new-privileges; cap-drop ALL then allowlist; mem/cpu/pid limits; one agent/container. Never --privileged, SYS_ADMIN, Docker socket.
+strict: ro root, nobody, no caps; 512m/1cpu/pids128 /work512m /tmp64m /shm64m; install off.
+tooled (default): rw root 0:0; CHOWN,DAC_OVERRIDE,FOWNER,SETUID,SETGID,SETFCAP; 4g/2cpu/pids512 /work2g /tmp512m /shm512m; install on.
+Data in isolis.py; inject ISOLIS_PROFILE, ISOLIS_INSTALL; shown by status/profiles//info.
+Changing profile/source of existing name: recreate container, update state, one notice.
+
+## Image tag
+isolis-agent:<profile>-<10hex sha256(profile+resolved source path)>. Distinct profile/source => distinct tags. State stores profile+source, not tag.
+
+## LLM
+MonkeyCode host-injected only. Env: MCAI_LLM_BASE_URL (often /v1), MCAI_LLM_API_KEY, MCAI_LLM_MODEL. Forward names; never print key (diag: length+prefix).
+Order: ISOLIS_MODEL > MCAI_LLM_MODEL > first advertised with platform prefix > ISOLIS_DEFAULT_MODEL > built-in. Skip blocked {auto, step-5-preview, deepseek-chat}.
+MUST NOT: ask USER_LLM_*/vendor URL/Key/.env; set LLM_ACTIVE=api or LLM_UPSTREAM_* vendor; hardcode vendor base_url/api_key/model; print keys/cat .env.
+Missing BASE_URL or API_KEY: init/setup/chat/rebuild fail one line "LLM not injected". No other-provider/invented-key fallback.
+
+## Protocol
+Detect OpenAI vs Anthropic before client: probe /chat/completions 1 token 6s; 404/405=Anthropic else OpenAI; cache process-lifetime. Anthropic: strip trailing /v1.
+timeout 60s, max_retries 1, temperature 0.4, max_tokens 4096 (Anthropic). TIKTOKEN_CACHE_DIR=/tmp.
+
+## HTTP :8080
+Common: {agent,hostname,pid,cwd:"/app"}; hostname+pid prove container origin.
+GET /health {ok,agent,hostname,pid,cwd}. Poll 0.5s, 3s/req, 45s ready.
+GET /info {ok,framework:"langchain",source,profile,install,android_home:"/opt/android-sdk",model,llm_host,via:"mc-direct",injected,protocol,tools[],workspace:"/work",history_turns,history_tokens,context_tokens:900000,context_hard_limit:1000000,max_message_chars:900000,max_turns:400,compress_batch:40,compressed_turns,archived_turns,+common}
+GET /history {ok,context_tokens,history_tokens,compressed_turns,history[{role,content}],archive[{role,content,reason:"compressed|evicted",at}],+common}
+POST /chat {message}; ok {ok,reply,tools_used:[],memory:{trimmed_input,trimmed_reply,evicted,compressed_turns,history_turns,context_tokens,history_tokens},+common}; 400 empty/"invalid json"; 404 "not found"; 500 error+trace.
+Ready only if /info confirms injection+route.
+
+## Memory
+MAX_TURNS 400 | MAX_TOOL_STEPS 8 | SHELL_TIMEOUT 120s | INSTALL_TIMEOUT 1800s | MAX_OUTPUT 20000 | CONTEXT_TOKENS 900000 | CONTEXT_HARD_LIMIT 1000000 | MAX_MESSAGE_CHARS 900000 | COMPRESS_BATCH 40 | SUMMARY_MAX_CHARS 8000 | SUMMARY_INPUT_CHARS 60000 | ARCHIVE_MAX 4000
+1. Turns: ISOLIS_MAX_TURNS pairs; older archive "evicted".
+2. Size: >ISOLIS_MAX_MESSAGE_CHARS head+tail truncate with marker.
+3. Tokens: live+system >ISOLIS_CONTEXT_TOKENS (0=off) fold oldest COMPRESS_BATCH into <=8000-char [compressed history] at front. Budget >HARD_LIMIT clamped, one notice.
+Compress: keep facts/paths/commands/versions/decisions/errors/open questions; one [compressed history] overwritten in place; newest pair never folded; folded -> archive "compressed". Archive newest 400, never sent to model. Tool >MAX_OUTPUT truncated with marker. MAX_TOOL_STEPS => return reply.
+Prompt: ISOLIS_SYSTEM_PROMPT or built-in (isolated, no host FS/siblings/Docker socket; match language; concise/factual; verify via commands; states install allowed).
+
+## Tools
+All: run_command (cwd /work, stdout/stderr/exit, /bin/sh -c non-login so /etc/profile cannot reset PATH); write_file/read_file/list_files in /work (write mkdirs; reject outside /work); browse headless Chromium title+text, optional /work screenshot.
+tooled: install_packages(apt|pip|npm, pkgs whitespace-normalized; apt DEBIAN_FRONTEND=noninteractive --no-install-recommends; pip --no-cache-dir; npm -g); install_android_sdk(pkgs) under ANDROID_HOME default platform-tools, platforms;android-34, build-tools;34.0.0. Both refuse in strict; stdout/stderr/exit; INSTALL_TIMEOUT.
+
+## Image
+python:3.12-slim-bookworm pinned (must ship JDK; floating tag can lose openjdk-17).
+openjdk-17-jdk-headless build-essential pkg-config cmake git curl wget ripgrep jq unzip zip xz-utils tar less vim-tiny nano procps psmisc file tree rsync openssh-client gnupg tini nodejs npm Python+pip Playwright Chromium.
+ANDROID_HOME=/opt/android-sdk writable. Env JAVA_HOME ANDROID_HOME ANDROID_SDK_ROOT GRADLE_USER_HOME NPM_CONFIG_CACHE PIP_CACHE_DIR TIKTOKEN_CACHE_DIR=/tmp HOME=/tmp.
+Android PATH (platform-tools, cmdline-tools/latest/bin, system) injected at start so PATH changes skip rebuild.
+Installer: require Java/curl/unzip; skip download if sdkmanager exists; CMDLINE_VERSION, ANDROID_PACKAGES overrides; licenses non-interactive; idempotent.
+
+## Source
+empty/local/builtin -> agent/. Else git: shallow clone .isolis/agent-src/<slug>/; later ff-pull (non-ff reported, keep local); Dockerfile required. Precedence: --source, ISOLIS_AGENT_SOURCE, local.
+
+## Flows
+Init: docker CLI+dockerd; MCAI_LLM_BASE_URL+API_KEY (no user API); registry reachable, mirror only if Hub blocked and none set; isolis-net; resolve profile+source, build/reuse tag; same-name matching profile+source reuse if healthy else recreate; docker run isolation flags; poll /health 45s; /info injection+route; save name,container,port,hostname,model,profile,source,created_at current=name; print ready port+tag. Fail after start: remove container, last log line.
+Chat: ensure running (init keeping profile+source); GET /info one line profile/hostname/model/host/route/tools; loop POST /chat print reply.
+setup idempotent, never starts agent: Docker CLI; LLM; Hub probe, mirror only if blocked/none, leave unreadable daemon.json; daemon (start detached root if needed); build; network; print profile/source/tag/network.
+doctor [ok]/[warn]/[fail]: CLI, daemon, registry/mirror, LLM vars+model key-len+prefix, local sources, profile+install, source, image, network, state. Exit 0 iff no [fail].
+
+## State
+{"version":1,"current":"<name|null>","agents":{"<name>":{"name","container":"isolis-<name>","port":18080,"hostname","model","profile","source","created_at":"<UTC>"}}}
+Missing=empty valid. Bad JSON=error. Atomic: temp+flush+fsync+os.replace. version=1; profile+source additive.
+
+## Accept
+1 doctor 0 with injection else nonzero
+2 profiles both, correct install+limits
+3 strict: nobody, ro, no caps, no install tools
+4 tooled: root, exactly 6 caps, install true, 7 tools
+5 strict install: refuse, no change
+6 tooled apt install + binary via run_command
+7 tooled install_android_sdk + adb version
+8 re-run installer skips existing sdkmanager
+9 init --source git clones, tagged image, /info source
+10 second same source: update clone, reuse image
+11 profile/source change recreates+updates state
+12 protocol vs provider needing stripped /v1
+13 ISOLIS_MODEL > MCAI_LLM_MODEL; blocked skip
+14 /info profile,install,source,tools,android_home
+15 all profiles: 1 loopback port, no host mounts, no docker.sock, tmpfs, limits, no-new-privileges
+16 stop removes+updates; status reflects
+17 state writes survive interrupt
+18 rebuild same profile+source
+19 memory bounded past MAX_TURNS; history_turns bounded
+20 <=8 tool trips then reply
+21 tool >20000 truncated+marker
+22 CONTEXT_TOKENS < live: fold one [compressed history]; compressed_turns+; archive+
+23 no second [compressed history]; in-place
+24 CONTEXT_TOKENS=0: no compress; archive only evicted; turn cap holds
+25 over MAX_MESSAGE_CHARS truncated+marker; trimmed_input true
+26 GET /history live+archive matching counters
+27 budget>1e6 clamped one notice; /info clamped context_tokens + hard_limit
+28 600000-char (~169k tok) answered, no 413/5xx
+29 after over-budget, compress shrinks live; first-message fact recoverable
+
+## Style/limits
+TUI ASCII no emoji. Short cmds. One-line errors naming next step. Isolation default. Never print secrets.
+Host: stdlib+Docker CLI. Agent framework in container. Only upstream: injected gateway.
+tooled: rw container FS; no host path, no docker.sock, no siblings (icc off).
+SDK/build caches on tmpfs, gone on remove; recreate re-downloads. Agent state never written to host.

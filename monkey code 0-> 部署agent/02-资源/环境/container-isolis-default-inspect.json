@@ -1,0 +1,273 @@
+[
+    {
+        "Id": "300e6f5058548b51f3958ad9f6e13e0259d8cb182f7d0b6db11b0facef10decf",
+        "Created": "2026-11-06T07:40:55.154548095Z",
+        "Path": "/usr/bin/tini",
+        "Args": [
+            "--",
+            "python",
+            "/app/server.py"
+        ],
+        "State": {
+            "Status": "running",
+            "Running": true,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": false,
+            "Dead": false,
+            "Pid": 20851,
+            "ExitCode": 0,
+            "Error": "",
+            "StartedAt": "2026-11-06T07:40:55.558433025Z",
+            "FinishedAt": "0001-01-01T00:00:00Z"
+        },
+        "Image": "sha256:7f61f25b2cabf29529411685b80de60f3af426a9e9c773f89d86c776a4085378",
+        "ResolvConfPath": "/var/lib/docker/containers/300e6f5058548b51f3958ad9f6e13e0259d8cb182f7d0b6db11b0facef10decf/resolv.conf",
+        "HostnamePath": "/var/lib/docker/containers/300e6f5058548b51f3958ad9f6e13e0259d8cb182f7d0b6db11b0facef10decf/hostname",
+        "HostsPath": "/var/lib/docker/containers/300e6f5058548b51f3958ad9f6e13e0259d8cb182f7d0b6db11b0facef10decf/hosts",
+        "LogPath": "/var/lib/docker/containers/300e6f5058548b51f3958ad9f6e13e0259d8cb182f7d0b6db11b0facef10decf/300e6f5058548b51f3958ad9f6e13e0259d8cb182f7d0b6db11b0facef10decf-json.log",
+        "Name": "/isolis-default",
+        "RestartCount": 0,
+        "Driver": "overlay2",
+        "Platform": "linux",
+        "MountLabel": "",
+        "ProcessLabel": "",
+        "AppArmorProfile": "",
+        "ExecIDs": null,
+        "HostConfig": {
+            "Binds": null,
+            "ContainerIDFile": "",
+            "LogConfig": {
+                "Type": "json-file",
+                "Config": {}
+            },
+            "NetworkMode": "isolis-net",
+            "PortBindings": {
+                "8080/tcp": [
+                    {
+                        "HostIp": "127.0.0.1",
+                        "HostPort": "18080"
+                    }
+                ]
+            },
+            "RestartPolicy": {
+                "Name": "no",
+                "MaximumRetryCount": 0
+            },
+            "AutoRemove": false,
+            "VolumeDriver": "",
+            "VolumesFrom": null,
+            "CapAdd": [
+                "CHOWN",
+                "DAC_OVERRIDE",
+                "FOWNER",
+                "SETUID",
+                "SETGID",
+                "SETFCAP"
+            ],
+            "CapDrop": [
+                "ALL"
+            ],
+            "CgroupnsMode": "private",
+            "Dns": [],
+            "DnsOptions": [],
+            "DnsSearch": [],
+            "ExtraHosts": null,
+            "GroupAdd": null,
+            "IpcMode": "private",
+            "Cgroup": "",
+            "Links": null,
+            "OomScoreAdj": 0,
+            "PidMode": "",
+            "Privileged": false,
+            "PublishAllPorts": false,
+            "ReadonlyRootfs": false,
+            "SecurityOpt": [
+                "no-new-privileges:true"
+            ],
+            "Tmpfs": {
+                "/dev/shm": "rw,nosuid,nodev,size=512m",
+                "/tmp": "rw,exec,nosuid,size=512m",
+                "/work": "rw,exec,nosuid,mode=1777,size=2g"
+            },
+            "UTSMode": "",
+            "UsernsMode": "",
+            "ShmSize": 67108864,
+            "Runtime": "runc",
+            "ConsoleSize": [
+                0,
+                0
+            ],
+            "Isolation": "",
+            "CpuShares": 0,
+            "Memory": 4294967296,
+            "NanoCpus": 2000000000,
+            "CgroupParent": "",
+            "BlkioWeight": 0,
+            "BlkioWeightDevice": [],
+            "BlkioDeviceReadBps": null,
+            "BlkioDeviceWriteBps": null,
+            "BlkioDeviceReadIOps": null,
+            "BlkioDeviceWriteIOps": null,
+            "CpuPeriod": 0,
+            "CpuQuota": 0,
+            "CpuRealtimePeriod": 0,
+            "CpuRealtimeRuntime": 0,
+            "CpusetCpus": "",
+            "CpusetMems": "",
+            "Devices": [],
+            "DeviceCgroupRules": null,
+            "DeviceRequests": null,
+            "KernelMemory": 0,
+            "KernelMemoryTCP": 0,
+            "MemoryReservation": 0,
+            "MemorySwap": 8589934592,
+            "MemorySwappiness": null,
+            "OomKillDisable": null,
+            "PidsLimit": 512,
+            "Ulimits": null,
+            "CpuCount": 0,
+            "CpuPercent": 0,
+            "IOMaximumIOps": 0,
+            "IOMaximumBandwidth": 0,
+            "MaskedPaths": [
+                "/proc/asound",
+                "/proc/acpi",
+                "/proc/kcore",
+                "/proc/keys",
+                "/proc/latency_stats",
+                "/proc/timer_list",
+                "/proc/timer_stats",
+                "/proc/sched_debug",
+                "/proc/scsi",
+                "/sys/firmware"
+            ],
+            "ReadonlyPaths": [
+                "/proc/bus",
+                "/proc/fs",
+                "/proc/irq",
+                "/proc/sys",
+                "/proc/sysrq-trigger"
+            ]
+        },
+        "GraphDriver": {
+            "Data": {
+                "LowerDir": "/var/lib/docker/overlay2/e5dd210fee06c07e6545662212ed1cfdd0b8387debe8c91b25e8ca88bcc134e3-init/diff:/var/lib/docker/overlay2/62e4cb702117bfd626c0c2e1b7d9d13fffe35b25ac00870692e5f39c2e47dc30/diff:/var/lib/docker/overlay2/9553709d7c3dc24a4ebd27e1837d0f1bbc977dd5d27bef019f0c078fa0ad8670/diff:/var/lib/docker/overlay2/da1f4e5cea777a5d9c022996e8ae7fb7577d9d7ba6af04cafc545e3bf1d90cb9/diff:/var/lib/docker/overlay2/55164acc907a99660dd692280bef6c8f963b3513f9aea2730729f38e3afef4e0/diff:/var/lib/docker/overlay2/5c3be18790d97a37de60c352a0cab6c6e2c328da0e034dc954d6f723031f9e29/diff:/var/lib/docker/overlay2/30538b1a7c831a7b0fb409ac1554d45bffa01bdb553cab0a1d2da2ae0c4e5b47/diff:/var/lib/docker/overlay2/37667322481d272270b345a4c78b1b3a64259f8f41081db99dccbd61f636afb4/diff:/var/lib/docker/overlay2/31a50d0e6920031d6d892c872f42067f1b4a906b8308def81af25faa0b38754e/diff:/var/lib/docker/overlay2/c97da494f86a51a695e2fc1844f6e57f7cee47ea084ea44dd1e458b583b0f423/diff:/var/lib/docker/overlay2/e0a8a5154e8494d9f635eebf5a457181910150753a1da198008caeb9d5bf7269/diff:/var/lib/docker/overlay2/6bc9953f47bd741515041f739672a1d73d9f53135e9973f4f417ddfe4340387a/diff:/var/lib/docker/overlay2/e51ac4d2287670a6545532c462b2644ba3e4ca84384d59ba15b4356ce565bcc5/diff:/var/lib/docker/overlay2/7ef88b56a68ca05af2b09526055fb784efadd2dd8042869cb2d53b5554b0c846/diff",
+                "MergedDir": "/var/lib/docker/overlay2/e5dd210fee06c07e6545662212ed1cfdd0b8387debe8c91b25e8ca88bcc134e3/merged",
+                "UpperDir": "/var/lib/docker/overlay2/e5dd210fee06c07e6545662212ed1cfdd0b8387debe8c91b25e8ca88bcc134e3/diff",
+                "WorkDir": "/var/lib/docker/overlay2/e5dd210fee06c07e6545662212ed1cfdd0b8387debe8c91b25e8ca88bcc134e3/work"
+            },
+            "Name": "overlay2"
+        },
+        "Mounts": [],
+        "Config": {
+            "Hostname": "300e6f505854",
+            "Domainname": "",
+            "User": "0:0",
+            "AttachStdin": false,
+            "AttachStdout": false,
+            "AttachStderr": false,
+            "ExposedPorts": {
+                "8080/tcp": {}
+            },
+            "Tty": false,
+            "OpenStdin": false,
+            "StdinOnce": false,
+            "Env": [
+                "HOME=/tmp",
+                "ISOLIS_AGENT_NAME=default",
+                "ISOLIS_SOURCE=local",
+                "MCAI_LLM_API_KEY=<redacted>",
+                "ISOLIS_MAX_MESSAGE_CHARS=900000",
+                "ISOLIS_FALLBACK_MODEL=monkeycode-pro/gpt-5.6-terra",
+                "LC_ALL=C.UTF-8",
+                "PATH=/opt/android-sdk/platform-tools:/opt/android-sdk/cmdline-tools/latest/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "ISOLIS_PROFILE=tooled",
+                "ISOLIS_CONTEXT_TOKENS=900000",
+                "ISOLIS_MAX_TURNS=400",
+                "MCAI_LLM_BASE_URL=https://proxy.monkeycode-ai.com/v1",
+                "LANG=C.UTF-8",
+                "PYTHONIOENCODING=utf-8",
+                "ISOLIS_INSTALL=1",
+                "ISOLIS_CONTEXT_HARD_LIMIT=1000000",
+                "ISOLIS_ARCHIVE_MAX=4000",
+                "MCAI_LLM_MODEL=monkeycode-basic/deepseek-flash",
+                "ISOLIS_MODEL=monkeycode-basic/deepseek-flash",
+                "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
+                "PYTHON_VERSION=3.12.16",
+                "PYTHON_SHA256=b5796915dc45ff745cfb4e990a7e7c93d6f546328a102ce31448d69ebc37575c",
+                "PYTHONUNBUFFERED=1",
+                "PYTHONDONTWRITEBYTECODE=1",
+                "PIP_NO_CACHE_DIR=1",
+                "TIKTOKEN_CACHE_DIR=/tmp",
+                "PLAYWRIGHT_BROWSERS_PATH=/ms-playwright",
+                "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64",
+                "ANDROID_HOME=/opt/android-sdk",
+                "ANDROID_SDK_ROOT=/opt/android-sdk",
+                "GRADLE_USER_HOME=/work/.gradle",
+                "NPM_CONFIG_CACHE=/work/.npm",
+                "PIP_CACHE_DIR=/work/.pip-cache",
+                "DEBIAN_FRONTEND=noninteractive"
+            ],
+            "Cmd": [
+                "python",
+                "/app/server.py"
+            ],
+            "Image": "isolis-agent:tooled-ca22788ffe",
+            "Volumes": null,
+            "WorkingDir": "/app",
+            "Entrypoint": [
+                "/usr/bin/tini",
+                "--"
+            ],
+            "OnBuild": null,
+            "Labels": {}
+        },
+        "NetworkSettings": {
+            "Bridge": "",
+            "SandboxID": "8427a96c36f4cd7115242ff44b901814b6cf2c6f31f367e37e1b8325ad4be723",
+            "HairpinMode": false,
+            "LinkLocalIPv6Address": "",
+            "LinkLocalIPv6PrefixLen": 0,
+            "Ports": {
+                "8080/tcp": [
+                    {
+                        "HostIp": "127.0.0.1",
+                        "HostPort": "18080"
+                    }
+                ]
+            },
+            "SandboxKey": "/var/run/docker/netns/8427a96c36f4",
+            "SecondaryIPAddresses": null,
+            "SecondaryIPv6Addresses": null,
+            "EndpointID": "",
+            "Gateway": "",
+            "GlobalIPv6Address": "",
+            "GlobalIPv6PrefixLen": 0,
+            "IPAddress": "",
+            "IPPrefixLen": 0,
+            "IPv6Gateway": "",
+            "MacAddress": "",
+            "Networks": {
+                "isolis-net": {
+                    "IPAMConfig": null,
+                    "Links": null,
+                    "Aliases": [
+                        "default",
+                        "300e6f505854"
+                    ],
+                    "NetworkID": "23ab7ed0b269c91733ab1eb8caf2b09d0d295a4a372926f4200448cf876e29c6",
+                    "EndpointID": "25f18a8f2fcf1acaa3329b3ed0eb7540a58fe56031dbaba1b2277cbd91398d89",
+                    "Gateway": "172.18.0.1",
+                    "IPAddress": "172.18.0.2",
+                    "IPPrefixLen": 16,
+                    "IPv6Gateway": "",
+                    "GlobalIPv6Address": "",
+                    "GlobalIPv6PrefixLen": 0,
+                    "MacAddress": "02:42:ac:12:00:02",
+                    "DriverOpts": null
+                }
+            }
+        }
+    }
+]
